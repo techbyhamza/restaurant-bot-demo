@@ -7,7 +7,7 @@ const axios = require('axios');
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT;
 const SHEETS_WEBAPP_URL = process.env.SHEETS_WEBAPP_URL || "";
 
 // ---- Brand Config (tailored) ----
