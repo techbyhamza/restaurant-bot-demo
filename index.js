@@ -107,132 +107,27 @@ async function logToSheets(payload){
 
 // ---- Route ----
 app.post("/whatsapp", async (req, res) => {
-  const from = (req.body.From || "").trim();
-  const body = (req.body.Body || "").trim();
+  try {
+    // صرف ٹیسٹ لاگ
+    console.log("[WA] Incoming:", req.body?.From, "| Body:", req.body?.Body);
 
-  // ensure session
-  let s = sessions.get(from);
-  if (!s) { s = { stage: "START" }; sessions.set(from, s); }
+    // لازمی XML ریسپانس
+    const reply = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Message>Hi! I received: ${ (req.body?.Body || "").toString().trim() }</Message>
+</Response>`;
 
-  // reset
-  if (body.toLowerCase() === "reset") {
-    sessions.delete(from);
-    return twiml(res, "Hi! Choose language:\n1) Urdu\n2) English\n\nSend the number of your choice.");
-  }
-
-  // back
-  if (body.toLowerCase() === "back") {
-    if (s.stage==="MODE") s.stage="BRAND";
-    else if (s.stage==="MENU") s.stage="MODE";
-    else if (s.stage==="QTY") s.stage="MENU";
-    else if (s.stage==="ADDRESS") s.stage="QTY";
-    else if (s.stage==="DINEIN_DATE") s.stage="MODE";
-    else if (s.stage==="DINEIN_TIME") s.stage="DINEIN_DATE";
-    else if (s.stage==="DINEIN_GUESTS") s.stage="DINEIN_TIME";
-    else if (s.stage==="PAYMENT") s.stage=(s.mode==="Dine‑in"?"DINEIN_GUESTS":(s.mode==="Delivery"?"ADDRESS":"QTY"));
-  }
-
-  switch (s.stage){
-
-    case "START": {
-      // زبان بس placeholder، سیدھا برانڈ پر چلیں
-      s.stage = "BRAND";
-      return twiml(res, brandList());
-    }
-
-    case "BRAND": {
-      const n = parseInt(body, 10);
-      const keys = AVAILABLE;
-      if (!n || n<1 || n>keys.length) return twiml(res, brandList());
-      s.brandKey = keys[n-1];
-      s.stage = "MODE";
-      return twiml(res, orderModes(CONFIG[s.brandKey]));
-    }
-
-    case "MODE": {
-      const cfg = CONFIG[s.brandKey];
-      if (body==="1" && cfg.delivery)  { s.mode="Delivery"; s.stage="MENU";  return twiml(res, menuText(cfg)); }
-      if (body==="2" && cfg.pickup)    { s.mode="Pickup";   s.stage="MENU";  return twiml(res, menuText(cfg)); }
-      if (body==="3" && cfg.dinein)    { s.mode="Dine‑in";  s.stage="DINEIN_DATE"; return twiml(res,"Enter dine‑in date (YYYY‑MM‑DD)"); }
-      return twiml(res, orderModes(cfg));
-    }
-
-    case "MENU": {
-      const cfg = CONFIG[s.brandKey];
-      const code = body.toUpperCase();
-      const item = cfg.menu.find(m=>m.code===code);
-      if (!item) return twiml(res, "Please send a valid item code.\n\n"+menuText(cfg));
-      s.itemCode = code;
-      s.stage = "QTY";
-      return twiml(res, "Send quantity (1‑20)");
-    }
-
-    case "QTY": {
-      const q = parseInt(body, 10);
-      if (!q || q<1 || q>20) return twiml(res, "Please send a valid quantity (1‑20).");
-      s.qty = q;
-      if (s.mode==="Delivery"){ s.stage="ADDRESS"; return twiml(res,"Enter delivery address:"); }
-      s.stage = "PAYMENT";
-      return twiml(res, paymentText(CONFIG[s.brandKey], false));
-    }
-
-    case "ADDRESS": {
-      if (!body || body.length<4) return twiml(res,"Please enter a complete address:");
-      s.address = body;
-      s.stage = "PAYMENT";
-      return twiml(res, paymentText(CONFIG[s.brandKey], false));
-    }
-
-    case "DINEIN_DATE": {
-      s.dineDate = body;
-      s.stage = "DINEIN_TIME";
-      return twiml(res,"Enter time (HH:MM 24h):");
-    }
-
-    case "DINEIN_TIME": {
-      s.dineTime = body;
-      s.stage = "DINEIN_GUESTS";
-      return twiml(res,"Guests (1‑20):");
-    }
-
-    case "DINEIN_GUESTS": {
-      const g = parseInt(body,10);
-      if (!g || g<1 || g>20) return twiml(res,"Please send a valid number (1‑20).");
-      s.dineGuests = g;
-      s.stage = "PAYMENT";
-      return twiml(res, paymentText(CONFIG[s.brandKey], true));
-    }
-
-    case "PAYMENT": {
-      const cfg = CONFIG[s.brandKey];
-      const opts = (s.mode==="Dine‑in" ? (cfg.dineInPaymentOptions||[]) : (cfg.paymentOptions||[]));
-      const idx = parseInt(body,10)-1;
-      if (idx<0 || idx>=opts.length) return twiml(res, paymentText(cfg, s.mode==="Dine‑in"));
-      s.payment = opts[idx];
-      s.stage = "CONFIRM";
-      const text = "Type 'yes' to confirm, or 'back/reset'.\n\n"+summary(cfg, s);
-      return twiml(res, text);
-    }
-
-    case "CONFIRM": {
-      if (body.toLowerCase()==="yes"){
-        // log to sheets (optional)
-        logToSheets({
-          from, brandKey: s.brandKey, brandName: CONFIG[s.brandKey].name,
-          mode: s.mode, itemCode: s.itemCode || "", qty: s.qty || "",
-          address: s.address || "", dineDate: s.dineDate || "", dineTime: s.dineTime || "",
-          dineGuests: s.dineGuests || "", payment: s.payment || "",
-          timestamp: new Date().toISOString()
-        });
-        sessions.delete(from);
-        return twiml(res, "Thanks! Your request has been sent. Type 'hi' to start again.");
-      }
-      return twiml(res, "Please type 'yes' to confirm, or use 'back'/'reset'.");
-    }
-
-    default:
-      sessions.delete(from);
-      return twiml(res, "Hi! Choose language:\n1) Urdu\n2) English");
+    res
+      .status(200)
+      .set("Content-Type", "application/xml")
+      .send(reply);
+  } catch (err) {
+    console.error("WA handler error", err);
+    // even on error, Twilio must get something
+    res
+      .status(200)
+      .set("Content-Type", "application/xml")
+      .send(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>Temporary error</Message></Response>`);
   }
 });
 
