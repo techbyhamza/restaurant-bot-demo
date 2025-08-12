@@ -132,15 +132,18 @@ async function logToSheets(payload){
 
 // ---------- Route ----------
 app.post("/whatsapp", async (req, res) => {
-  try{
-    // Optional: log incoming
-    // console.log("[WA] Incoming:", req.body?.From, "| Body:", req.body?.Body);
-
-    // ensure session
     const from = (req.body.From || "").trim();
     const body = (req.body.Body || "").trim();
-    let s = sessions.get(from);
-    if (!s){ s = { stage: STAGE.START, lang: LANG.EN }; sessions.set(from, s); }
+
+    console.log("[WA] step0", { from, body, stage: (sessions.get(from)?.stage || "NEW") });
+
+    try {
+        // ensure session
+        let s = sessions.get(from);
+        if (!s) { 
+            s = { stage: STAGE_START, lang: LANG.EN }; 
+            sessions.set(from, s); 
+        }
 
     // reset
     if (body.toLowerCase()==="reset"){
