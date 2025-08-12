@@ -136,13 +136,24 @@ function summaryText(lang, brandKey, s){
   return out;
 }
 function logToSheets(payload){
-  if (!SHEETS_WEBAPP_URL) return;
-  axios.post(SHEETS_WEBAPP_URL, payload).catch(()=>{});
+  if (!SHEETS_WEBAPP_URL) {
+    console.error("[Sheets] URL missing");
+    return;
+  }
+  console.log("[Sheets] POST ->", SHEETS_WEBAPP_URL, JSON.stringify(payload));
+  axios.post(SHEETS_WEBAPP_URL, payload)
+    .then(r => console.log("[Sheets] OK", r.status, typeof r.data === "string" ? r.data : JSON.stringify(r.data)))
+    .catch(err => {
+      const st   = err.response?.status;
+      const body = err.response?.data || err.message;
+      console.error("[Sheets] ERROR", st, body);
+    });
 }
-
 app.post("/whatsapp", (req,res)=>{
-  const from = req.body.From || "";
-  const body = (req.body.Body || "").trim();
+ console.log("[WA] Incoming:", req.body?.From, "| Body:", (req.body?.Body || "").toString());
+
+ const from = req.body.From || "";
+ const body = (req.body.Body || "").trim();
   let s = sessions.get(from);
 
   if (body.toLowerCase()==="reset"){ s = { stage: "START" }; sessions.set(from, s); }
