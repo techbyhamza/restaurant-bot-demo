@@ -106,13 +106,7 @@ async function logToSheets(payload){
 }
 
 // ---- Route ----
-app.post("/whatsapp", async (req, res) => {// --- TEMP ALIVE TEST (remove after test) ---
-return res
-  .status(200)
-  .set("Content-Type", "application/xml")
-  .send('<?xml version="1.0" encoding="UTF-8"?><Response><Message>Hi! Bot is alive ✅</Message></Response>');
-// --- END TEMP ---
-
+app.post("/whatsapp", async (req, res) => {
   const from = (req.body.From || "").trim();
   const body = (req.body.Body || "").trim();
 
