@@ -132,134 +132,40 @@ async function logToSheets(payload){
 
 // ---------- Route ----------
 app.post("/whatsapp", async (req, res) => {
-    const from = (req.body.From || "").trim();
-    const body = (req.body.Body || "").trim();
+  try {
+    // Twilio x-www-form-urlencoded body کو پڑھنے کے لئے یہ لائن اوپر کہیں موجود ہونی چاہیے:
+    // app.use(bodyParser.urlencoded({ extended: false }));
 
-    console.log("[WA] step0", { from, body, stage: (sessions.get(from)?.stage || "NEW") });
+    const from = (req.body?.From || "").toString().trim();
+    const body = (req.body?.Body || "").toString().trim();
 
-    try {
-        // ensure session
-        let s = sessions.get(from);
-        if (!s) { 
-            s = { stage: STAGE_START, lang: LANG.EN }; 
-            sessions.set(from, s); 
-        }
+    // ڈیبگ لاگ (Railway Deploy Logs میں نظر آئے گا)
+    console.log("[WA] Incoming:", { from, body });
 
-    // reset
-    if (body.toLowerCase()==="reset"){
-      sessions.delete(from);
-      return twiml(res, "Hi! Choose language:\n1) Urdu\n2) English\n\nSend the number of your choice.");
-    }
+    // سادہ جواب: ہمیشہ زبان چننے کا مینو
+    const reply = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Message>Hi! Choose language:
+1) Urdu
+2) English
 
-    // back
-    if (body.toLowerCase()==="back"){
-      if (s.stage===STAGE.MODE) s.stage=STAGE.BRAND;
-      else if (s.stage===STAGE.MENU) s.stage=STAGE.MODE;
-      else if (s.stage===STAGE.QTY) s.stage=STAGE.MENU;
-      else if (s.stage===STAGE.ADDRESS) s.stage=STAGE.QTY;
-      else if (s.stage===STAGE.DINEIN_DATE) s.stage=STAGE.MODE;
-      else if (s.stage===STAGE.DINEIN_TIME) s.stage=STAGE.DINEIN_DATE;
-      else if (s.stage===STAGE.DINEIN_GUESTS) s.stage=STAGE.DINEIN_TIME;
-      else if (s.stage===STAGE.PAYMENT) s.stage=(s.mode==="Dine-in")?STAGE.DINEIN_GUESTS:STAGE.ADDRESS;
-      else s.stage=STAGE.QTY;
-    }
+Send the number of your choice.</Message>
+</Response>`;
 
-    switch (s.stage){
-      case STAGE.START:{
-        if (body==="1"){ s.lang=LANG.UR; s.stage=STAGE.BRAND; return twiml(res, brandList(s.lang)); }
-        if (body==="2"){ s.lang=LANG.EN; s.stage=STAGE.BRAND; return twiml(res, brandList(s.lang)); }
-        return twiml(res, "Hi! Choose language:\n1) Urdu\n2) English\n\nSend the number of your choice.");
-      }
-
-      case STAGE.BRAND:{
-        const keys = Object.keys(CONFIG);
-        const n = parseInt(body,10);
-        if (!n || n<1 || n>keys.length) return twiml(res, brandList(s.lang));
-        s.brandKey = keys[n-1];
-        s.stage = STAGE.MODE;
-        return twiml(res, orderModes(s.lang, s.brandKey));
-      }
-
-      case STAGE.MODE:{
-        const sel = parseInt(body,10);
-        if (sel===1){ s.mode="Delivery"; s.stage=STAGE.MENU; return twiml(res, menuText(s.lang, s.brandKey)); }
-        if (sel===2){ s.mode="Pickup";   s.stage=STAGE.MENU; return twiml(res, menuText(s.lang, s.brandKey)); }
-        if (sel===3){ s.mode="Dine-in";  s.stage=STAGE.DINEIN_DATE; return twiml(res, "Enter dine-in date (YYYY-MM-DD)"); }
-        return twiml(res, orderModes(s.lang, s.brandKey));
-      }
-
-      case STAGE.MENU:{
-        const item = CONFIG[s.brandKey].menu.find(i=> i.code===body.toUpperCase());
-        if (!item) return twiml(res, "Please send a valid item code.\n\n"+menuText(s.lang, s.brandKey));
-        s.itemCode = item.code;
-        s.stage = STAGE.QTY;
-        return twiml(res, "Send quantity (1–20)");
-      }
-
-      case STAGE.QTY:{
-        const q = parseInt(body,10);
-        if (!q || q<1 || q>20) return twiml(res, "Please send a valid quantity (1–20).");
-        s.qty = q;
-        if (s.mode==="Delivery"){ s.stage=STAGE.ADDRESS; return twiml(res, "Enter delivery address:"); }
-        s.stage = STAGE.PAYMENT;
-        return twiml(res, paymentText(s.lang, s.brandKey, false));
-      }
-
-      case STAGE.ADDRESS:{
-        if (body.length<6) return twiml(res, "Please enter a complete address.");
-        s.address = body;
-        s.stage = STAGE.PAYMENT;
-        return twiml(res, paymentText(s.lang, s.brandKey, false));
-      }
-
-      case STAGE.DINEIN_DATE:{ s.dineDate=body; s.stage=STAGE.DINEIN_TIME; return twiml(res,"Enter time (HH:MM) 24h"); }
-      case STAGE.DINEIN_TIME:{ s.dineTime=body; s.stage=STAGE.DINEIN_GUESTS; return twiml(res,"Guests (1–20)?"); }
-      case STAGE.DINEIN_GUESTS:{
-        const g = parseInt(body,10); if (!g||g<1||g>20) return twiml(res,"Please send a valid number (1–20).");
-        s.dineGuests=g; s.stage=STAGE.PAYMENT; return twiml(res, paymentText(s.lang, s.brandKey, true));
-      }
-
-      case STAGE.PAYMENT:{
-        const cfg = CONFIG[s.brandKey];
-        const options = (s.mode==="Dine-in" ? (cfg.dineInPaymentOptions||[]) : (cfg.paymentOptions||[]));
-        const idx = parseInt(body,10)-1;
-        if (idx<0 || idx>=options.length) return twiml(res, paymentText(s.lang, s.brandKey, s.mode==="Dine-in"));
-        s.payment = options[idx] || options[idx];
-        s.stage = STAGE.CONFIRM;
-        return twiml(res, "Type 'yes' to confirm, or 'back/reset'.\n"+summaryText(s.lang, s.brandKey, s));
-      }
-
-      case STAGE.CONFIRM:{
-        if (body.toLowerCase()==="yes"){
-          // log to sheets (optional)
-          logToSheets({
-            from, brandKey: s.brandKey, brandName: CONFIG[s.brandKey].name,
-            mode: s.mode, itemCode: s.itemCode || "", qty: s.qty || "",
-            address: s.address || "", dineDate: s.dineDate || "", dineTime: s.dineTime || "",
-            dineGuests: s.dineGuests || "", payment: s.payment || "", timestamp: new Date().toISOString()
-          });
-          sessions.delete(from);
-          return twiml(res, "Thanks! Your request has been sent. Type 'hi' to start again.");
-        }
-        return twiml(res, "Please type 'yes' to confirm, or use 'back/reset'.\n"+summaryText(s.lang, s.brandKey, s));
-      }
-
-      default:{
-        sessions.delete(from);
-        return twiml(res, "Hi! Choose language:\n1) Urdu\n2) English");
-      }
-    }
-
-  }catch(err){
-    console.error("[WA handler error]", err);
-    // Twilio must always get a 200 with XML
-    res
+    return res
       .status(200)
-      .set("Content-Type","application/xml")
+      .set("Content-Type", "application/xml")
+      .send(reply);
+
+  } catch (err) {
+    console.error("[WA handler error]", err);
+    // ایرر میں بھی Twilio کو valid XML ضرور بھیجیں
+    return res
+      .status(200)
+      .set("Content-Type", "application/xml")
       .send(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>Temporary error</Message></Response>`);
   }
 });
-
 // health check
 app.get("/", (_req,res)=> res.type("text/plain").send("WhatsApp Restaurant Demo (minimal) running."));
 const PORT = process.env.PORT || 8080;
