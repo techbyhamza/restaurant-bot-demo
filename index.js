@@ -10,21 +10,41 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
 // ---------------- Config ----------------
+// ---------------- Config ----------------
 const CONFIG = {
   alnoor: {
     name: "Al Noor Pizza & Grill",
     delivery: true,
     pickup: true,
     dinein: true,
-    paymentOptions: ["COD", "PAY_AT_COUNTER"], // آپ چاہیں تو بدل لیں
+    paymentOptions: ["COD", "PAY_AT_COUNTER"], // "PAY_ONLINE" بعد میں آسانی سے add ہو جائے گا
     menu: [
-      { code: "P1S", name: "Margherita (Small)", price: 10 },
-      { code: "P1M", name: "Margherita (Medium)", price: 14 },
-      { code: "P1L", name: "Margherita (Large)", price: 18 },
-      { code: "BK1", name: "Zinger Burger",      price: 9  },
-      { code: "DS1", name: "Chocolate Brownie",  price: 4  }
+      // Pizzas
+      { code: "PZ-MARG-S", name: "Margherita (Small)", price: 10 },
+      { code: "PZ-MARG-M", name: "Margherita (Medium)", price: 14 },
+      { code: "PZ-MARG-L", name: "Margherita (Large)", price: 18 },
+      { code: "PZ-BBQ-M",  name: "BBQ Chicken (Medium)", price: 16 },
+      { code: "PZ-PEPP-L", name: "Pepperoni (Large)", price: 20 },
+
+      // Burgers & Mains
+      { code: "BG-ZING",   name: "Zinger Burger", price: 9 },
+      { code: "BG-DBF",    name: "Double Beef Burger", price: 12 },
+      { code: "MN-SHAWR",  name: "Chicken Shawarma Plate", price: 13 },
+
+      // Sides
+      { code: "SD-FRIES",  name: "Fries (Regular)", price: 4 },
+      { code: "SD-GARLIC", name: "Garlic Bread", price: 4 },
+
+      // Drinks
+      { code: "DR-COLA",   name: "Cola Can", price: 2.5 },
+      { code: "DR-WATER",  name: "Water Bottle", price: 2 },
+
+      // Desserts
+      { code: "DS-BROWN",  name: "Chocolate Brownie", price: 4 },
+      { code: "DS-ICE",    name: "Ice Cream Cup", price: 4 }
     ],
   },
+
   firstchoice: {
     name: "First Choice Foods",
     delivery: true,
@@ -32,10 +52,27 @@ const CONFIG = {
     dinein: true,
     paymentOptions: ["COD", "PAY_AT_COUNTER"],
     menu: [
-      { code: "BK2", name: "Double Beef Burger",  price: 12 },
-      { code: "MN1", name: "Chicken Biryani",     price: 10 },
-      { code: "MN2", name: "Butter Chicken + Naan", price: 14 },
-      { code: "DS2", name: "Ice Cream Cup",       price: 4  }
+      // Pakistani/Indian mains
+      { code: "IN-BIRY",   name: "Chicken Biryani", price: 10 },
+      { code: "IN-BTRCH",  name: "Butter Chicken + Naan", price: 14 },
+      { code: "IN-KORMA",  name: "Beef Korma + Naan", price: 15 },
+      { code: "IN-DAL",    name: "Dal Tadka + Rice", price: 9 },
+
+      // Burgers & Wraps
+      { code: "BG-ZING",   name: "Zinger Burger", price: 9 },
+      { code: "WR-CHIC",   name: "Chicken Wrap", price: 8.5 },
+
+      // Sides
+      { code: "SD-SALAD",  name: "Green Salad", price: 5 },
+      { code: "SD-RAITA",  name: "Raita", price: 2 },
+
+      // Drinks
+      { code: "DR-LASSI",  name: "Sweet Lassi", price: 4 },
+      { code: "DR-MANGO",  name: "Mango Juice", price: 4.5 },
+
+      // Desserts
+      { code: "DS-KHEER",  name: "Kheer", price: 4 },
+      { code: "DS-GULAB",  name: "Gulab Jamun (2pc)", price: 4 }
     ],
   },
 };
