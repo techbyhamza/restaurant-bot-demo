@@ -1,243 +1,211 @@
-// ====== Imports & Setup ======
-const express = require("express");
-const axios = require("axios");
-const { MessagingResponse } = require("twilio").twiml;
+// index.js — WhatsApp restaurant bot (Twilio webhook)
+// Requirements: express, axios, dotenv, body-parser (یا express.urlencoded), twilio
+
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
+const { twiml: { MessagingResponse } } = require('twilio');
 
 const app = express();
-app.use(express.urlencoded({ extended: true }));
+
+// Twilio WhatsApp webhooks send x-www-form-urlencoded
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// ====== Google Apps Script Web App URL (آپ کا والا) ======
-const SHEETS_WEBAPP_URL =
-  "https://script.google.com/macros/s/AKfycbwSFlGupG5znLBi5-zGMo16jEM5wLtZUYyvL-qCANYyjGnDhH_YJbZYWODJrNElb8dX/exec";
+// ----- ENV -----
+const PORT = process.env.PORT || 3000;
+const SHEETS_WEBAPP_URL = process.env.SHEETS_WEBAPP_URL || ""; // <-- Apps Script Web App (/exec) URL ضروری
 
-// ====== In-memory sessions ======
-const sessions = new Map();
+// ----- Simple session store (in-memory) -----
+const sessions = new Map(); // key = phone, value = state bag
 
-// ====== Simple Config ======
-const LANG = { UR: "UR", EN: "EN" };
-const STAGE = {
-  START: "START",
-  BRAND: "BRAND",
-  MENU: "MENU",
-  QTY: "QTY",
-  ADDRESS: "ADDRESS",
-  PAYMENT: "PAYMENT",
-  CONFIRM: "CONFIRM",
-};
-
-// دو برانڈز + تھوڑا سا مینو
-const CONFIG = {
-  alnoor: {
-    name: "Al Noor Pizza & Grill",
-    items: [
-      { code: "P1S", name_en: "Margherita (Small)", price: 10 },
-      { code: "P1M", name_en: "Margherita (Medium)", price: 14 },
-      { code: "P2M", name_en: "BBQ Chicken (Medium)", price: 16 },
-    ],
-    paymentOptions: ["Cash on Delivery", "Card on Delivery"],
-  },
-  firstchoice: {
-    name: "First Choice Foods",
-    items: [
-      { code: "B1K", name_en: "Burger (Single)", price: 8 },
-      { code: "B2", name_en: "Double Burger", price: 12 },
-      { code: "DS2", name_en: "Ice Cream Cup", price: 4 },
-    ],
-    paymentOptions: ["Cash on Delivery", "Card on Delivery"],
-  },
-};
-
-// ====== Helpers ======
-function twiml(res, text) {
-  const tw = new MessagingResponse();
-  tw.message(text);
-  res.type("text/xml").send(tw.toString());
-}
-
-function brandList() {
-  const keys = Object.keys(CONFIG);
-  return keys
-    .map(
-      (k, i) => `${i + 1}) ${CONFIG[k].name}`
-    )
-    .join("\n");
-}
-
-function brandKeyFromChoice(n) {
-  const idx = parseInt(n, 10) - 1;
-  const keys = Object.keys(CONFIG);
-  if (isNaN(idx) || idx < 0 || idx >= keys.length) return null;
-  return keys[idx];
-}
-
-function menuText(cfg) {
-  return (
-    `${cfg.name} — Menu\n` +
-    `Send item code (e.g., ${cfg.items[0].code})\n\n` +
-    cfg.items.map(i => `• ${i.code} — ${i.name_en} ($${i.price})`).join("\n") +
-    `\n\nUse 'back' or 'reset'.`
-  );
-}
-
-function summaryText(cfg, s) {
-  if (s.mode === "Delivery") {
-    return (
-      `Item: ${s.itemCode}\nQty: ${s.qty}\nAddress: ${s.address}\n` +
-      `Total: $${(Number(s.price || 0) * Number(s.qty || 1)).toFixed(2)}`
-    );
+function getSession(key) {
+  if (!sessions.has(key)) {
+    sessions.set(key, {
+      state: 'LANG',          // LANG -> MENU -> QTY -> ADDRESS -> PAYMENT -> CONFIRM
+      lang: 'EN',
+      itemCode: '',
+      qty: 1,
+      address: '',
+      payment: '',
+      orderId: '',
+      customerName: ''
+    });
   }
-  return `Payment: ${s.payment}`;
+  return sessions.get(key);
 }
 
-// Google Sheet پر لکھیں
-async function logToSheets(payload) {
+// ----- Menu -----
+const MENU = {
+  B1K: { name: 'Burger (Single)', price: 8 },
+  B2:  { name: 'Double Burger',  price: 12 },
+  DS2: { name: 'Ice Cream Cup',  price: 4 },
+};
+
+function menuText() {
+  return [
+    'First Choice Foods — Menu',
+    'Send item code (e.g., B1K)',
+    `• B1K — ${MENU.B1K.name} ($${MENU.B1K.price})`,
+    `• B2 —  ${MENU.B2.name} ($${MENU.B2.price})`,
+    `• DS2 — ${MENU.DS2.name} ($${MENU.DS2.price})`,
+    '',
+    "Use 'back' or 'reset'."
+  ].join('\n');
+}
+
+// ----- Helpers -----
+function reply(res, text) {
+  const m = new MessagingResponse();
+  m.message(text);
+  res.type('text/xml');
+  return res.send(m.toString());
+}
+
+function normalize(bodyText) {
+  const raw = (bodyText || '').trim();
+  const singleSp = raw.replace(/\s+/g, ' ');
+  return { raw, text: singleSp, upper: singleSp.toUpperCase() };
+}
+
+async function logToSheet(payload) {
+  if (!SHEETS_WEBAPP_URL) return { ok: false, error: 'Missing SHEETS_WEBAPP_URL' };
   try {
-    await axios.post(SHEETS_WEBAPP_URL, payload);
-    console.log("[Sheets] OK");
+    const { data } = await axios.post(SHEETS_WEBAPP_URL, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 10000
+    });
+    return { ok: true, data };
   } catch (err) {
-    console.error(
-      "[Sheets] ERROR",
-      err?.response?.status,
-      err?.message
-    );
+    return { ok: false, error: err?.response?.data || err.message };
   }
 }
 
-// ====== Route ======
-app.post("/whatsapp", async (req, res) => {
-  const from = (req.body.From || "").trim();
-  const body = (req.body.Body || "").trim();
+function resetSession(s) {
+  s.state = 'LANG';
+  s.lang = 'EN';
+  s.itemCode = '';
+  s.qty = 1;
+  s.address = '';
+  s.payment = '';
+  s.orderId = '';
+  s.customerName = '';
+}
 
-  // reset / back
-  if (body.toLowerCase() === "reset") {
-    sessions.delete(from);
-    return twiml(
-      res,
-      "Hi! Choose language:\n1) Urdu\n2) English\n\nSend the number of your choice."
-    );
+// ----- WhatsApp webhook -----
+app.post('/whatsapp', async (req, res) => {
+  const from = req.body.From || 'unknown';
+  const s = getSession(from);
+
+  const { raw, text, upper } = normalize(req.body.Body);
+
+  // shortcuts
+  if (upper === 'RESET') { resetSession(s); return reply(res, "Session reset. Type 'hi' to start."); }
+  if (upper === 'BACK') {
+    if (s.state === 'QTY') s.state = 'MENU';
+    else if (s.state === 'ADDRESS') s.state = 'QTY';
+    else if (s.state === 'PAYMENT') s.state = 'ADDRESS';
+    else if (s.state === 'CONFIRM') s.state = 'PAYMENT';
+    return reply(res, `Went back. Current step: ${s.state}.`);
   }
 
-  let s = sessions.get(from);
-  if (!s) {
-    s = { stage: STAGE.START, lang: LANG.EN };
-    sessions.set(from, s);
-    return twiml(
-      res,
-      "Hi! Choose language:\n1) Urdu\n2) English\n\nSend the number of your choice."
-    );
+  console.log(`[${from}] state=${s.state} msg="${raw}" item=${s.itemCode||'-'} qty=${s.qty||'-'}`);
+
+  // ---- Flow ----
+  if (upper === 'HI' || s.state === 'LANG') {
+    s.state = 'LANG';
+    return reply(res, "Hi! Choose language:\n1) Urdu\n2) English\n\nSend the number of your choice.");
   }
 
-  // back
-  if (body.toLowerCase() === "back") {
-    if (s.stage === STAGE.MENU) s.stage = STAGE.BRAND;
-    else if (s.stage === STAGE.QTY) s.stage = STAGE.MENU;
-    else if (s.stage === STAGE.ADDRESS) s.stage = STAGE.QTY;
-    else if (s.stage === STAGE.PAYMENT) s.stage = STAGE.ADDRESS;
-    else if (s.stage === STAGE.CONFIRM) s.stage = STAGE.PAYMENT;
+  if (s.state === 'LANG') {
+    if (upper === '1') { s.lang = 'UR'; s.state = 'MENU'; return reply(res, menuText()); }
+    if (upper === '2') { s.lang = 'EN'; s.state = 'MENU'; return reply(res, menuText()); }
+    return reply(res, "Please send 1 (Urdu) or 2 (English).");
   }
 
-  switch (s.stage) {
-    case STAGE.START: {
-      if (body === "1") s.lang = LANG.UR;
-      else if (body === "2") s.lang = LANG.EN;
-      s.stage = STAGE.BRAND;
-      return twiml(
-        res,
-        (s.lang === LANG.UR ? "ریسٹورنٹ منتخب کریں:\n" : "Select Restaurant:\n") +
-          brandList() +
-          "\n\n" +
-          (s.lang === LANG.UR
-            ? "اپنا انتخاب نمبر بھیجیں۔"
-            : "Send the number of your choice.")
-      );
+  if (s.state === 'MENU') {
+    if (MENU[upper]) {
+      s.itemCode = upper;
+      s.state = 'QTY';
+      return reply(res, `✔️ ${MENU[upper].name} selected.\nPlease send quantity (1–20).`);
     }
+    return reply(res, menuText());
+  }
 
-    case STAGE.BRAND: {
-      const key = brandKeyFromChoice(body);
-      if (!key) return twiml(res, "Please send a valid number (1/2).");
-      s.brandKey = key;
-      s.stage = STAGE.MENU;
-      return twiml(res, menuText(CONFIG[s.brandKey]));
+  if (s.state === 'QTY') {
+    const q = parseInt(upper, 10);
+    if (!Number.isFinite(q) || q <= 0 || q > 20) {
+      return reply(res, 'Please send a valid quantity (e.g., 1, 2).');
     }
+    s.qty = q;
+    s.state = 'ADDRESS';
+    return reply(res, `Quantity: ${q}\nSend delivery address:`);
+  }
 
-    case STAGE.MENU: {
-      const cfg = CONFIG[s.brandKey];
-      const item = cfg.items.find((i) => i.code.toLowerCase() === body.toLowerCase());
-      if (!item) return twiml(res, "Please send a valid item code shown above.");
-      s.itemCode = item.code;
-      s.itemName = item.name_en;
-      s.price = item.price;
-      s.stage = STAGE.QTY;
-      return twiml(res, "Quantity?");
+  if (s.state === 'ADDRESS') {
+    if (text.length < 4) return reply(res, 'Please send a proper address.');
+    s.address = text;
+    s.state = 'PAYMENT';
+    return reply(res, "Payment method?\n1) Cash on Delivery\n2) Card on Arrival\n3) Online (Paid)");
+  }
+
+  if (s.state === 'PAYMENT') {
+    if (!['1','2','3'].includes(upper)) {
+      return reply(res, "Please choose 1, 2, or 3:\n1) Cash on Delivery\n2) Card on Arrival\n3) Online (Paid)");
     }
+    s.payment = (upper === '1') ? 'Cash on Delivery' : (upper === '2') ? 'Card on Arrival' : 'Online (Paid)';
+    s.state = 'CONFIRM';
 
-    case STAGE.QTY: {
-      const q = parseInt(body, 10);
-      if (!q || q <= 0) return twiml(res, "Please send a valid quantity (e.g., 1, 2).");
-      s.qty = q;
-      s.stage = STAGE.ADDRESS;
-      return twiml(res, "Send delivery address (or type 'Pickup' if you want to pickup).");
-    }
+    const item = MENU[s.itemCode];
+    const total = item.price * s.qty;
+    const summary = [
+      `Please type 'yes' to confirm, or 'back/reset'.`,
+      '',
+      `Item: ${item.name} (${s.itemCode})`,
+      `Qty: ${s.qty}`,
+      `Address: ${s.address}`,
+      `Payment: ${s.payment}`,
+      `Total: $${total}`
+    ].join('\n');
+    return reply(res, summary);
+  }
 
-    case STAGE.ADDRESS: {
-      s.address = body;
-      s.stage = STAGE.PAYMENT;
-      const opts = CONFIG[s.brandKey].paymentOptions;
-      return twiml(
-        res,
-        "Select payment:\n" + opts.map((o, i) => `${i + 1}) ${o}`).join("\n")
-      );
-    }
+  if (s.state === 'CONFIRM') {
+    if (upper !== 'YES') return reply(res, "Type 'yes' to confirm, or 'back/reset'.");
 
-    case STAGE.PAYMENT: {
-      const cfg = CONFIG[s.brandKey];
-      const idx = parseInt(body, 10) - 1;
-      if (isNaN(idx) || idx < 0 || idx >= cfg.paymentOptions.length)
-        return twiml(res, "Please send a valid option number.");
-      s.payment = cfg.paymentOptions[idx];
-      s.stage = STAGE.CONFIRM;
-      return twiml(
-        res,
-        "Type 'yes' to confirm, or 'back/reset'.\n\n" + summaryText(cfg, s)
-      );
-    }
+    // Build order payload
+    const nowId = Date.now().toString().slice(-6);
+    s.orderId = `ORD-${nowId}`;
+    const item = MENU[s.itemCode];
+    const payload = {
+      orderId: s.orderId,
+      customerName: req.body.ProfileName || '',  // Twilio may pass profile name
+      phoneNumber: from,
+      orderDetails: `${item.name} (${s.itemCode}) x ${s.qty} — $${item.price * s.qty}`,
+      quantity: s.qty,
+      deliveryAddress: s.address,
+      paymentMethod: s.payment
+    };
 
-    case STAGE.CONFIRM: {
-      if (body.toLowerCase() === "yes") {
-        // آرڈر شیٹ کو بھیجیں
-        const orderId = `${Date.now()}`.slice(-8);
-        await logToSheets({
-          orderId,
-          customerName: "WhatsApp User",
-          phoneNumber: from.replace("whatsapp:", ""),
-          orderDetails: `${CONFIG[s.brandKey].name} | ${s.itemCode} x ${s.qty}`,
-          quantity: String(s.qty),
-          deliveryAddress: s.address || "",
-          paymentMethod: s.payment || "",
-        });
+    // Log to Google Sheet
+    const result = await logToSheet(payload);
+    console.log('Sheets response:', result);
 
-        sessions.delete(from);
-        return twiml(res, "Thanks! Your request has been sent. Type 'hi' to start again.");
-      }
-      return twiml(res, "Type 'yes' to confirm, or use 'back'/'reset'.");
-    }
-
-    default: {
-      sessions.delete(from);
-      return twiml(
-        res,
-        "Hi! Choose language:\n1) Urdu\n2) English"
-      );
+    resetSession(s);
+    if (result.ok) {
+      return reply(res, "Thanks! Your request has been sent. Type 'hi' to start again.");
+    } else {
+      return reply(res, `Order received but logging failed: ${result.error}\nType 'hi' to start again.`);
     }
   }
+
+  // default fallback
+  return reply(res, "Type 'hi' to start.");
 });
 
-// health check
-app.get("/", (_req, res) =>
-  res.type("text/plain").send("WhatsApp Restaurant Demo (minimal) running.")
-);
+// Health check
+app.get('/', (_req, res) => res.send('OK'));
 
-// start server
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log("Server on", PORT));
+app.listen(PORT, () => {
+  console.log('Server running on', PORT);
+});
