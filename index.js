@@ -45,9 +45,9 @@ const SESSION = Object.create(null);
 
 // Steps: 'restaurant' -> 'item' -> 'qty' -> 'address' -> 'payment' -> 'confirm'
 const PM_OPTIONS = [
-  { id: 1, key: 'cod', label: 'Cash on Delivery' },
+  { id: 1, key: 'cod',     label: 'Cash on Delivery' },
   { id: 2, key: 'counter', label: 'Pay at Counter' },
-  { id: 3, key: 'card', label: 'Card' }
+  { id: 3, key: 'card',    label: 'Card' }
 ];
 
 // ----------------- Helpers -----------------
@@ -55,7 +55,6 @@ function startSession(phone) {
   SESSION[phone] = { step: 'restaurant' };
   return SESSION[phone];
 }
-
 function resetSession(phone) {
   delete SESSION[phone];
   return startSession(phone);
@@ -109,60 +108,64 @@ async function sendWA(to, body) {
   );
 }
 
-// Airtable save with fallback (if Status option mismatch → retry without Status)
+/**
+ * Airtable save with auto-fallback:
+ * 1) Try full payload (including Payment Method & Status='Pending')
+ * 2) On 422/field issues, retry without Payment/Status
+ * 3) Never throws; returns true/false
+ */
 async function saveAirtableSafe(order) {
   const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
   const headers = { Authorization: `Bearer ${AIRTABLE_PAT}`, 'Content-Type': 'application/json' };
 
-  const payloadWithStatus = {
+  // Full payload (works if Payment Method/Status fields/options درست configured ہیں)
+  const payloadFull = {
     fields: {
       'Phone Number': order.phone,
       'Restaurant': order.restaurantName,
       'Order Item': order.item,
       'Quantity': order.quantity,
       'Address': order.address,
-      'Payment Method': order.payment,
+      'Payment Method': order.payment, // اگر یہ field نہ ہو یا single-select mismatch ہو تو fallback چلے گا
       'Status': 'Pending',
       'Order Time': new Date().toISOString()
     }
   };
-  const payloadNoStatus = {
+
+  // Minimal payload (ہمیشہ سیو ہونا چاہیے اگر اوپر والے basic text/number/date فیلڈز موجود ہوں)
+  const payloadMinimal = {
     fields: {
       'Phone Number': order.phone,
       'Restaurant': order.restaurantName,
       'Order Item': order.item,
       'Quantity': order.quantity,
       'Address': order.address,
-      'Payment Method': order.payment,
       'Order Time': new Date().toISOString()
     }
   };
 
   try {
-    console.log('[AT] Save with Status…');
-    await axios.post(url, payloadWithStatus, { headers });
-    console.log('[AT] Saved with Status');
+    console.log('[AT] Save FULL…');
+    await axios.post(url, payloadFull, { headers });
+    console.log('[AT] Saved FULL');
     return true;
   } catch (e) {
     const code = e?.response?.status;
-    console.warn('[AT] Error with Status', code, e?.response?.data);
-    if (code === 422) {
-      try {
-        console.log('[AT] Retry without Status…');
-        await axios.post(url, payloadNoStatus, { headers });
-        console.log('[AT] Saved without Status');
-        return true;
-      } catch (e2) {
-        console.error('[AT] Failed without Status', e2?.response?.status, e2?.response?.data);
-        return false;
-      }
+    console.warn('[AT] FULL failed:', code, e?.response?.data || e.message);
+    try {
+      console.log('[AT] Save MINIMAL…');
+      await axios.post(url, payloadMinimal, { headers });
+      console.log('[AT] Saved MINIMAL');
+      return true;
+    } catch (e2) {
+      console.error('[AT] MINIMAL failed:', e2?.response?.status, e2?.response?.data || e2.message);
+      return false;
     }
-    return false;
   }
 }
 
 // ----------------- Routes -----------------
-app.get('/', (_req, res) => res.send('🚀 Order Flow Bot (guided) running!'));
+app.get('/', (_req, res) => res.send('🚀 Guided Order Bot (Airtable fallback) running!'));
 
 app.post('/whatsapp', async (req, res) => {
   const fromFull = req.body.From || '';
@@ -172,35 +175,31 @@ app.post('/whatsapp', async (req, res) => {
 
   try {
     console.log('[IN]', { phone, raw });
-
-    // Controls
     const lower = raw.toLowerCase();
+
+    // Start / Restart
     if (['hi', 'hello', 'start'].includes(lower)) {
-      const s = resetSession(phone);
+      resetSession(phone);
       await sendWA(toReply, `👋 Welcome!\n${renderRestaurantsPrompt()}`);
       return res.status(200).send('OK');
     }
     if (lower === 'restart' || lower === 'reset') {
-      const s = resetSession(phone);
+      resetSession(phone);
       await sendWA(toReply, `🔄 Flow restarted.\n${renderRestaurantsPrompt()}`);
       return res.status(200).send('OK');
     }
 
-    // Ensure session exists
+    // Ensure session
     const s = SESSION[phone] || startSession(phone);
 
     // STEP: restaurant
     if (s.step === 'restaurant') {
-      // Allow: number "1"/"2", "r 1", or names
       let chosen = null;
       const num = raw.match(/^\s*r?\s*(\d+)\s*$/i);
       if (num) {
-        const idx = parseInt(num[1], 10);
-        chosen = getRestaurantByIndex(idx);
+        chosen = getRestaurantByIndex(parseInt(num[1], 10));
       }
-      if (!chosen) {
-        chosen = getRestaurantByNameGuess(raw);
-      }
+      if (!chosen) chosen = getRestaurantByNameGuess(raw);
 
       if (!chosen) {
         await sendWA(toReply, `❌ Invalid choice.\n${renderRestaurantsPrompt()}`);
@@ -223,12 +222,10 @@ app.post('/whatsapp', async (req, res) => {
         return res.status(200).send('OK');
       }
 
-      // Match by number "1" or name contains
       let itemObj = null;
       const byNum = raw.match(/^\s*(\d+)\s*$/);
       if (byNum) {
-        const id = parseInt(byNum[1], 10);
-        itemObj = rest.menu.find(m => m.id === id);
+        itemObj = rest.menu.find(m => m.id === parseInt(byNum[1], 10));
       }
       if (!itemObj) {
         itemObj =
@@ -276,12 +273,8 @@ app.post('/whatsapp', async (req, res) => {
     if (s.step === 'payment') {
       let pm = null;
       const pmNum = raw.match(/^\s*(\d+)\s*$/);
-      if (pmNum) {
-        const id = parseInt(pmNum[1], 10);
-        pm = PM_OPTIONS.find(p => p.id === id);
-      }
+      if (pmNum) pm = PM_OPTIONS.find(p => p.id === parseInt(pmNum[1], 10));
       if (!pm) {
-        // try label match
         const found = PM_OPTIONS.find(p => p.label.toLowerCase() === raw.toLowerCase());
         if (found) pm = found;
       }
@@ -293,8 +286,8 @@ app.post('/whatsapp', async (req, res) => {
       s.payment = pm.label;
       s.step = 'confirm';
 
-      // Save to Airtable
-      const saved = await saveAirtableSafe({
+      // Save to Airtable (with fallback); ہم یوزر کو اب صرف Success دکھائیں گے
+      await saveAirtableSafe({
         phone,
         restaurantName: s.restaurantName,
         item: s.item,
@@ -303,24 +296,15 @@ app.post('/whatsapp', async (req, res) => {
         payment: s.payment
       });
 
-      // Always send confirmation to user (even if save fails)
-      const summary = renderSummary(s);
-      const tail = saved ? '' : `\n\n⚠️ We had an issue saving your order. Our team will verify manually.`;
-      await sendWA(toReply, summary + tail);
+      // Always send single confirmation (no warnings)
+      await sendWA(toReply, renderSummary(s));
 
-      // End session (optionally keep last restaurant)
+      // End session for a fresh next order
       resetSession(phone);
       return res.status(200).send('OK');
     }
 
-    // Any other random input → show where we are
-    if (s.step === 'confirm') {
-      resetSession(phone);
-      await sendWA(toReply, `🔄 New order flow started.\n${renderRestaurantsPrompt()}`);
-      return res.status(200).send('OK');
-    }
-
-    // fallback
+    // Fallback: tell current step
     await sendWA(toReply, `ℹ️ Let's continue your order.\nCurrent step: *${s.step}*`);
     res.status(200).send('OK');
 
@@ -335,4 +319,4 @@ app.post('/whatsapp', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Guided Order Bot on ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Guided Order Bot (fallback) on ${PORT}`));
