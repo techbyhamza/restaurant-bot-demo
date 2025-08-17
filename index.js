@@ -39,33 +39,69 @@ const RESTAURANTS = [
   }
 ];
 
-// In-memory session: phone -> selected restaurant key
+// ----------------- Conversation State -----------------
+// phone -> { step, restaurantKey, restaurantName, item, quantity, address, payment }
 const SESSION = Object.create(null);
 
+// Steps: 'restaurant' -> 'item' -> 'qty' -> 'address' -> 'payment' -> 'confirm'
+const PM_OPTIONS = [
+  { id: 1, key: 'cod', label: 'Cash on Delivery' },
+  { id: 2, key: 'counter', label: 'Pay at Counter' },
+  { id: 3, key: 'card', label: 'Card' }
+];
+
 // ----------------- Helpers -----------------
-const welcome = () =>
-  "👋 Welcome!\n" +
-  "Type *restaurants* to choose a restaurant, or *menu* to view the current one.\n" +
-  "You can order like *1 2* (item #1 x2) or *Veg Pizza 3*.";
+function startSession(phone) {
+  SESSION[phone] = { step: 'restaurant' };
+  return SESSION[phone];
+}
 
-const renderRestaurants = () =>
-  "🏪 *Restaurants*\n" +
-  RESTAURANTS.map((r, i) => `${i + 1}. ${r.name}`).join('\n') +
-  "\n\nReply *r 1* or just *1* to select. You can also type the name (e.g. *al noor*).";
+function resetSession(phone) {
+  delete SESSION[phone];
+  return startSession(phone);
+}
 
-const findRestaurantByIndex = (idx) => RESTAURANTS[idx - 1];
-const findRestaurantByKey = (key) => RESTAURANTS.find(r => r.key === key);
+function getRestaurantByIndex(i) {
+  return RESTAURANTS[i - 1] || null;
+}
+function getRestaurantByNameGuess(text) {
+  const t = text.toLowerCase();
+  if (t.includes('al noor')) return RESTAURANTS.find(r => r.key === 'alnoor');
+  if (t.includes('first choice') || t.includes('firstchoice')) return RESTAURANTS.find(r => r.key === 'firstchoice');
+  return null;
+}
 
-const renderMenu = (restaurant) => {
-  const lines = restaurant.menu.map(i => `${i.id}. ${i.name}`).join('\n');
-  return `📋 *${restaurant.name} Menu*\n${lines}\n\n` +
-         `Reply *<number> <qty>* (e.g. *1 2*) or *<name> <qty>* (e.g. *${restaurant.menu[0].name} 2*).\n` +
-         `Type *restaurants* to switch.`;
-};
+function renderRestaurantsPrompt() {
+  const lines = RESTAURANTS.map((r, i) => `${i + 1}. ${r.name}`).join('\n');
+  return `🏪 *Select a restaurant*\n${lines}\n\nReply with a number (e.g. *1*) or name (e.g. *Al Noor*).`;
+}
+function renderMenuPrompt(restaurant) {
+  const lines = restaurant.menu.map(m => `${m.id}. ${m.name}`).join('\n');
+  return `📋 *${restaurant.name} Menu*\n${lines}\n\nPlease send *item number* or *exact item name*.`;
+}
+function renderQtyPrompt(itemName) {
+  return `🧮 *Quantity for* "${itemName}"?\nReply with a number (e.g. *2*).`;
+}
+function renderAddressPrompt() {
+  return `📍 *Please share your delivery address* (street, suburb, postcode).`;
+}
+function renderPaymentPrompt() {
+  const opts = PM_OPTIONS.map(p => `${p.id}. ${p.label}`).join('\n');
+  return `💳 *Choose payment method*\n${opts}\n\nReply with a number (e.g. *1*).`;
+}
+function renderSummary(s) {
+  return `🧾 *Order Summary*\n` +
+    `Restaurant: ${s.restaurantName}\n` +
+    `Item: ${s.item}\n` +
+    `Quantity: ${s.quantity}\n` +
+    `Address: ${s.address}\n` +
+    `Payment: ${s.payment}\n\n` +
+    `✅ Thanks! Your order has been placed. Status: *Pending*.`;
+}
 
-async function sendWhatsApp(to, body) {
+async function sendWA(to, body) {
   const basicAuth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
-  console.log('[WA] Sending to', to, '->', body);
+  console.log('[WA] ->', body);
   await axios.post(
     `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
     qs.stringify({ To: to, From: TWILIO_WHATSAPP_FROM, Body: body }),
@@ -73,215 +109,230 @@ async function sendWhatsApp(to, body) {
   );
 }
 
-/**
- * Safe Airtable save:
- *  - Try with Status="Pending"
- *  - If 422 (select option) => retry without Status (assumes default in Airtable)
- *  - Returns { ok: boolean, error?: any }
- */
-async function saveToAirtableSafe({ phone, restaurantName, item, quantity }) {
+// Airtable save with fallback (if Status option mismatch → retry without Status)
+async function saveAirtableSafe(order) {
   const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
   const headers = { Authorization: `Bearer ${AIRTABLE_PAT}`, 'Content-Type': 'application/json' };
 
   const payloadWithStatus = {
     fields: {
-      'Phone Number': phone,
-      'Restaurant': restaurantName, // remove this line if you don't keep a Restaurant column
-      'Order Item': item,
-      'Quantity': quantity,
+      'Phone Number': order.phone,
+      'Restaurant': order.restaurantName,
+      'Order Item': order.item,
+      'Quantity': order.quantity,
+      'Address': order.address,
+      'Payment Method': order.payment,
       'Status': 'Pending',
       'Order Time': new Date().toISOString()
     }
   };
-
   const payloadNoStatus = {
     fields: {
-      'Phone Number': phone,
-      'Restaurant': restaurantName, // remove this line if not needed
-      'Order Item': item,
-      'Quantity': quantity,
+      'Phone Number': order.phone,
+      'Restaurant': order.restaurantName,
+      'Order Item': order.item,
+      'Quantity': order.quantity,
+      'Address': order.address,
+      'Payment Method': order.payment,
       'Order Time': new Date().toISOString()
     }
   };
 
   try {
-    console.log('[AT] Creating record (with Status)…', { item, quantity, restaurantName });
+    console.log('[AT] Save with Status…');
     await axios.post(url, payloadWithStatus, { headers });
     console.log('[AT] Saved with Status');
-    return { ok: true };
+    return true;
   } catch (e) {
     const code = e?.response?.status;
-    const data = e?.response?.data;
-    console.warn('[AT] Error with Status:', code, data);
-    // If select option problem, try without Status (use default in Airtable)
+    console.warn('[AT] Error with Status', code, e?.response?.data);
     if (code === 422) {
       try {
-        console.log('[AT] Retrying without Status (expecting default)…');
+        console.log('[AT] Retry without Status…');
         await axios.post(url, payloadNoStatus, { headers });
         console.log('[AT] Saved without Status');
-        return { ok: true };
+        return true;
       } catch (e2) {
-        console.error('[AT] Failed without Status:', e2?.response?.status, e2?.response?.data);
-        return { ok: false, error: e2?.response?.data || e2.message };
+        console.error('[AT] Failed without Status', e2?.response?.status, e2?.response?.data);
+        return false;
       }
     }
-    return { ok: false, error: data || e.message };
+    return false;
   }
 }
 
 // ----------------- Routes -----------------
-app.get('/', (_req, res) => res.send('🚀 WhatsApp Bot (Multi-Restaurant + Menu + Airtable) running!'));
+app.get('/', (_req, res) => res.send('🚀 Order Flow Bot (guided) running!'));
 
 app.post('/whatsapp', async (req, res) => {
+  const fromFull = req.body.From || '';
+  const toReply = fromFull;
+  const phone = fromFull.replace('whatsapp:', '');
+  const raw = (req.body.Body || '').trim();
+
   try {
-    const fromFull = req.body.From || '';       // "whatsapp:+61..."
-    const toReply = fromFull;
-    const phone = fromFull.replace('whatsapp:', '');
-    const raw = (req.body.Body || '').trim();
+    console.log('[IN]', { phone, raw });
+
+    // Controls
     const lower = raw.toLowerCase();
-
-    console.log('[IN]', { from: phone, raw });
-
-    // 0) Greetings / help
-    if (['hi', 'hello', 'help'].includes(lower)) {
-      await sendWhatsApp(toReply, `${welcome()}\n\n${renderRestaurants()}`);
+    if (['hi', 'hello', 'start'].includes(lower)) {
+      const s = resetSession(phone);
+      await sendWA(toReply, `👋 Welcome!\n${renderRestaurantsPrompt()}`);
+      return res.status(200).send('OK');
+    }
+    if (lower === 'restart' || lower === 'reset') {
+      const s = resetSession(phone);
+      await sendWA(toReply, `🔄 Flow restarted.\n${renderRestaurantsPrompt()}`);
       return res.status(200).send('OK');
     }
 
-    // 1) Show restaurants list
-    if (lower === 'restaurants') {
-      await sendWhatsApp(toReply, renderRestaurants());
-      return res.status(200).send('OK');
-    }
+    // Ensure session exists
+    const s = SESSION[phone] || startSession(phone);
 
-    // 2) Flexible restaurant selection
-    let currentKey = SESSION[phone] || null;
-    let currentRestaurant = currentKey ? findRestaurantByKey(currentKey) : null;
-
-    const wantSelect =
-      lower === 'select restaurant' ||
-      lower.startsWith('r ') ||
-      /^\s*\d+\s*$/.test(lower) ||
-      lower.includes('al noor') ||
-      lower.includes('first choice') ||
-      lower === 'r1' || lower === 'r2';
-
-    if (!currentRestaurant || wantSelect) {
+    // STEP: restaurant
+    if (s.step === 'restaurant') {
+      // Allow: number "1"/"2", "r 1", or names
       let chosen = null;
-
-      // "r 1" / "r 2"
-      const pickR = raw.match(/^\s*r\s*(\d+)\s*$/i);
-      // "1" / "2"
-      const pickNumOnly = raw.match(/^\s*(\d+)\s*$/);
-
-      if (pickR) {
-        const idx = parseInt(pickR[1], 10);
-        chosen = findRestaurantByIndex(idx);
-      } else if (pickNumOnly) {
-        const idx = parseInt(pickNumOnly[1], 10);
-        chosen = findRestaurantByIndex(idx);
-      } else if (lower.includes('al noor')) {
-        chosen = findRestaurantByKey('alnoor');
-      } else if (lower.includes('first choice')) {
-        chosen = findRestaurantByKey('firstchoice');
+      const num = raw.match(/^\s*r?\s*(\d+)\s*$/i);
+      if (num) {
+        const idx = parseInt(num[1], 10);
+        chosen = getRestaurantByIndex(idx);
+      }
+      if (!chosen) {
+        chosen = getRestaurantByNameGuess(raw);
       }
 
-      if (chosen) {
-        SESSION[phone] = chosen.key;
-        currentKey = chosen.key;
-        currentRestaurant = chosen;
-        await sendWhatsApp(toReply, `✅ Selected: *${chosen.name}*\n\n${renderMenu(chosen)}`);
+      if (!chosen) {
+        await sendWA(toReply, `❌ Invalid choice.\n${renderRestaurantsPrompt()}`);
         return res.status(200).send('OK');
       }
 
-      if (!currentRestaurant && (lower === 'menu' || wantSelect)) {
-        await sendWhatsApp(toReply, "ℹ️ Please select a restaurant first.\n\n" + renderRestaurants());
-        return res.status(200).send('OK');
-      }
-    }
-
-    // 3) Show menu
-    if (lower === 'menu') {
-      if (!currentRestaurant) {
-        await sendWhatsApp(toReply, "ℹ️ Please select a restaurant first.\n\n" + renderRestaurants());
-        return res.status(200).send('OK');
-      }
-      await sendWhatsApp(toReply, renderMenu(currentRestaurant));
+      s.restaurantKey = chosen.key;
+      s.restaurantName = chosen.name;
+      s.step = 'item';
+      await sendWA(toReply, `✅ Selected: *${s.restaurantName}*\n\n${renderMenuPrompt(chosen)}\n\n(Type *restart* anytime to start over.)`);
       return res.status(200).send('OK');
     }
 
-    // 4) Place order — numeric "1 2"
-    if (currentRestaurant) {
-      const numQty = raw.match(/^\s*(\d+)\s+(\d+)\s*$/);
-      if (numQty) {
-        const id = parseInt(numQty[1], 10);
-        const qty = parseInt(numQty[2], 10) || 1;
-        const found = currentRestaurant.menu.find(i => i.id === id);
-        if (!found) {
-          await sendWhatsApp(toReply, "❌ Invalid item number.\n\n" + renderMenu(currentRestaurant));
-          return res.status(200).send('OK');
-        }
-
-        const result = await saveToAirtableSafe({
-          phone,
-          restaurantName: currentRestaurant.name,
-          item: found.name,
-          quantity: qty
-        });
-
-        const confirm = result.ok
-          ? `✅ *${currentRestaurant.name}*: *${found.name}* x ${qty}\nStatus: *Pending*.\n\nThanks! Your order has been placed.`
-          : `✅ *${currentRestaurant.name}*: *${found.name}* x ${qty}\n(We received your order, but there was a save issue. We'll confirm shortly.)`;
-
-        await sendWhatsApp(toReply, confirm + `\n\nType *menu* to order more or *restaurants* to switch.`);
+    // STEP: item
+    if (s.step === 'item') {
+      const rest = RESTAURANTS.find(r => r.key === s.restaurantKey);
+      if (!rest) {
+        s.step = 'restaurant';
+        await sendWA(toReply, renderRestaurantsPrompt());
         return res.status(200).send('OK');
       }
 
-      // 5) Place order — "<name> <qty>" or just "<name>"
-      const parts = raw.split(/\s+/);
-      const maybeQty = parseInt(parts[parts.length - 1], 10);
-      let qty = 1;
-      let nameText = raw;
-      if (!Number.isNaN(maybeQty)) {
-        qty = maybeQty;
-        nameText = parts.slice(0, -1).join(' ');
+      // Match by number "1" or name contains
+      let itemObj = null;
+      const byNum = raw.match(/^\s*(\d+)\s*$/);
+      if (byNum) {
+        const id = parseInt(byNum[1], 10);
+        itemObj = rest.menu.find(m => m.id === id);
+      }
+      if (!itemObj) {
+        itemObj =
+          rest.menu.find(m => raw.toLowerCase().includes(m.name.toLowerCase())) ||
+          rest.menu.find(m => m.name.toLowerCase().includes(raw.toLowerCase()));
       }
 
-      const foundByName =
-        currentRestaurant.menu.find(i => nameText.toLowerCase().includes(i.name.toLowerCase())) ||
-        currentRestaurant.menu.find(i => i.name.toLowerCase().includes(nameText.toLowerCase()));
-
-      const itemName = foundByName ? foundByName.name : nameText;
-      if (itemName && itemName.length >= 2) {
-        const result = await saveToAirtableSafe({
-          phone,
-          restaurantName: currentRestaurant.name,
-          item: itemName,
-          quantity: qty || 1
-        });
-
-        const confirm = result.ok
-          ? `✅ *${currentRestaurant.name}*: *${itemName}* x ${qty || 1}\nStatus: *Pending*.\n\nThanks! Your order has been placed.`
-          : `✅ *${currentRestaurant.name}*: *${itemName}* x ${qty || 1}\n(We received your order, but there was a save issue. We'll confirm shortly.)`;
-
-        await sendWhatsApp(toReply, confirm + `\n\nType *menu* to order more or *restaurants* to switch.`);
+      if (!itemObj) {
+        await sendWA(toReply, `❌ Item not found.\n${renderMenuPrompt(rest)}`);
         return res.status(200).send('OK');
       }
+
+      s.item = itemObj.name;
+      s.step = 'qty';
+      await sendWA(toReply, renderQtyPrompt(s.item));
+      return res.status(200).send('OK');
     }
 
-    // 6) Fallback
-    await sendWhatsApp(toReply, `${welcome()}\n\n${renderRestaurants()}`);
+    // STEP: qty
+    if (s.step === 'qty') {
+      const q = parseInt(raw, 10);
+      if (!q || q < 1 || q > 999) {
+        await sendWA(toReply, `❌ Please send a valid quantity (1-999).\n${renderQtyPrompt(s.item)}`);
+        return res.status(200).send('OK');
+      }
+      s.quantity = q;
+      s.step = 'address';
+      await sendWA(toReply, renderAddressPrompt());
+      return res.status(200).send('OK');
+    }
+
+    // STEP: address
+    if (s.step === 'address') {
+      if (!raw || raw.length < 5) {
+        await sendWA(toReply, `❌ Address looks too short.\n${renderAddressPrompt()}`);
+        return res.status(200).send('OK');
+      }
+      s.address = raw;
+      s.step = 'payment';
+      await sendWA(toReply, renderPaymentPrompt());
+      return res.status(200).send('OK');
+    }
+
+    // STEP: payment
+    if (s.step === 'payment') {
+      let pm = null;
+      const pmNum = raw.match(/^\s*(\d+)\s*$/);
+      if (pmNum) {
+        const id = parseInt(pmNum[1], 10);
+        pm = PM_OPTIONS.find(p => p.id === id);
+      }
+      if (!pm) {
+        // try label match
+        const found = PM_OPTIONS.find(p => p.label.toLowerCase() === raw.toLowerCase());
+        if (found) pm = found;
+      }
+      if (!pm) {
+        await sendWA(toReply, `❌ Invalid choice.\n${renderPaymentPrompt()}`);
+        return res.status(200).send('OK');
+      }
+
+      s.payment = pm.label;
+      s.step = 'confirm';
+
+      // Save to Airtable
+      const saved = await saveAirtableSafe({
+        phone,
+        restaurantName: s.restaurantName,
+        item: s.item,
+        quantity: s.quantity,
+        address: s.address,
+        payment: s.payment
+      });
+
+      // Always send confirmation to user (even if save fails)
+      const summary = renderSummary(s);
+      const tail = saved ? '' : `\n\n⚠️ We had an issue saving your order. Our team will verify manually.`;
+      await sendWA(toReply, summary + tail);
+
+      // End session (optionally keep last restaurant)
+      resetSession(phone);
+      return res.status(200).send('OK');
+    }
+
+    // Any other random input → show where we are
+    if (s.step === 'confirm') {
+      resetSession(phone);
+      await sendWA(toReply, `🔄 New order flow started.\n${renderRestaurantsPrompt()}`);
+      return res.status(200).send('OK');
+    }
+
+    // fallback
+    await sendWA(toReply, `ℹ️ Let's continue your order.\nCurrent step: *${s.step}*`);
     res.status(200).send('OK');
 
   } catch (err) {
-    console.error('❌ Error:', err.response?.data || err.message);
+    console.error('❌ Handler error:', err.response?.data || err.message);
     try {
       const toReply = req.body.From;
-      if (toReply) await sendWhatsApp(toReply, "⚠️ Sorry, something went wrong. Type *restaurants* or *menu*.");
-    } catch (_) {}
+      if (toReply) await sendWA(toReply, '⚠️ Something went wrong. Type *restart* to start over.');
+    } catch(_) {}
     res.status(200).send('OK');
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server on ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Guided Order Bot on ${PORT}`));
