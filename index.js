@@ -1,78 +1,86 @@
 // index.js
 
-import express from "express";
-import bodyParser from "body-parser";
-import Airtable from "airtable";
-import twilio from "twilio";
+const express = require('express');
+const axios = require('axios');
+const qs = require('qs');
 
-const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
-
-// 🔹 Env Variables
 const {
   AIRTABLE_BASE_ID,
   AIRTABLE_PAT,
   AIRTABLE_TABLE_NAME,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_WHATSAPP_FROM,
+  TWILIO_WHATSAPP_FROM
 } = process.env;
 
-// 🔹 Airtable Client
-const base = new Airtable({ apiKey: AIRTABLE_PAT }).base(AIRTABLE_BASE_ID);
+const app = express();
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 
-// 🔹 Twilio Client
-const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-
-// Root check
-app.get("/", (req, res) => {
-  res.send("✅ WhatsApp Bot is running with Airtable!");
+app.get('/', (req, res) => {
+  res.send('🚀 WhatsApp Bot is running with Airtable!');
 });
 
-// WhatsApp webhook
-app.post("/whatsapp", async (req, res) => {
+// Twilio WhatsApp webhook
+app.post('/whatsapp', async (req, res) => {
   try {
-    const incomingMsg = req.body.Body ? req.body.Body.trim().toLowerCase() : "";
-    const from = req.body.From;
+    const fromFull = req.body.From || '';               // e.g. "whatsapp:+61400123456"
+    const from = fromFull.replace('whatsapp:', '');
+    const raw = (req.body.Body || '').trim();           // e.g. "pizza 2"
 
-    let reply = "❓ Sorry, I didn’t understand that. Reply with 'menu'.";
+    // simple parser: first word = item, second = quantity (default = 1)
+    const [item = '', qtyStr = '1'] = raw.split(/\s+/);
+    const quantity = Number.parseInt(qtyStr, 10) || 1;
 
-    if (incomingMsg === "hi" || incomingMsg === "hello") {
-      reply =
-        "👋 Welcome to Al Noor Pizza!\nType 'menu' to see our items.";
-    } else if (incomingMsg === "menu") {
-      reply = "📋 Our Menu:\n1. Veg Pizza\n2. Chicken Pizza\n3. Drinks\n\nReply with item name to order.";
-    } else if (
-      incomingMsg.includes("pizza") ||
-      incomingMsg.includes("drink")
-    ) {
-      // Save order in Airtable
-      await base(AIRTABLE_TABLE_NAME).create([
-        {
-          fields: {
-            Customer: from,
-            Item: incomingMsg,
-            Status: "Open",
-          },
-        },
-      ]);
-      reply = `✅ Your order for "${incomingMsg}" has been placed!`;
-    }
+    // (A) Save the order into Airtable
+    await axios.post(
+      `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`,
+      {
+        fields: {
+          'Phone Number': from,
+          'Order Item': item || raw,
+          'Quantity': quantity,
+          'Status': 'Pending',
+          'Order Time': new Date().toISOString()
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${AIRTABLE_PAT}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
 
-    // Send reply back to WhatsApp
-    await client.messages.create({
-      from: TWILIO_WHATSAPP_FROM,
-      to: from,
-      body: reply,
-    });
+    // (B) Send confirmation reply via Twilio REST API
+    const messageBody = `Thanks! Order received: ${item || raw} x ${quantity}. Status: Pending.`;
+    const basicAuth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
 
-    res.send("OK");
+    await axios.post(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+      qs.stringify({
+        To: `whatsapp:+${from.replace(/^\+?/, '')}`,
+        From: TWILIO_WHATSAPP_FROM,
+        Body: messageBody
+      }),
+      {
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      }
+    );
+
+    // Always respond 200 to Twilio
+    res.status(200).send('OK');
   } catch (err) {
-    console.error("❌ Error:", err);
-    res.status(500).send("Error processing request");
+    console.error('❌ Error:', err.response?.data || err.message);
+    // Still respond 200 to prevent Twilio retries
+    res.status(200).send('OK');
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
