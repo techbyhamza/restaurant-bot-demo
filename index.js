@@ -1,85 +1,40 @@
-// index.js
-
-const express = require('express');
-const axios = require('axios');
-const qs = require('qs');
-
-const {
-  AIRTABLE_BASE_ID,
-  AIRTABLE_PAT,
-  AIRTABLE_TABLE_NAME,
-  TWILIO_ACCOUNT_SID,
-  TWILIO_AUTH_TOKEN,
-  TWILIO_WHATSAPP_FROM
-} = process.env;
+import express from "express";
+import bodyParser from "body-parser";
+import Airtable from "airtable";
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+app.use(bodyParser.json());
 
-app.get('/', (req, res) => {
-  res.send('🚀 WhatsApp Bot is running with Airtable!');
-});
+// Airtable configuration
+const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY })
+  .base(process.env.AIRTABLE_BASE_ID);
 
-// Twilio WhatsApp webhook
-app.post('/whatsapp', async (req, res) => {
+// ✅ Test route to check Airtable integration
+app.get("/test", async (req, res) => {
   try {
-    const fromFull = req.body.From || '';               // e.g. "whatsapp:+61400123456"
-    const from = fromFull.replace('whatsapp:', '');
-    const raw = (req.body.Body || '').trim();           // e.g. "pizza 2"
-
-    // simple parser: first word = item, second = quantity (default = 1)
-    const [item = '', qtyStr = '1'] = raw.split(/\s+/);
-    const quantity = Number.parseInt(qtyStr, 10) || 1;
-
-    // (A) Save the order into Airtable
-    await axios.post(
-      `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`,
+    const record = await base("Orders").create([
       {
         fields: {
-          'Phone Number': from,
-          'Order Item': item || raw,
-          'Quantity': quantity,
-          'Status': 'Pending',
-          'Order Time': new Date().toISOString()
-        }
+          Name: "Hamza",
+          Item: "Pizza",
+          Quantity: 1,
+        },
       },
-      {
-        headers: {
-          Authorization: `Bearer ${AIRTABLE_PAT}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    ]);
 
-    // (B) Send confirmation reply via Twilio REST API
-    const messageBody = `Thanks! Order received: ${item || raw} x ${quantity}. Status: Pending.`;
-    const basicAuth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
-
-    await axios.post(
-      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
-      qs.stringify({
-        To: `whatsapp:+${from.replace(/^\+?/, '')}`,
-        From: TWILIO_WHATSAPP_FROM,
-        Body: messageBody
-      }),
-      {
-        headers: {
-          Authorization: `Basic ${basicAuth}`,
-          'Content-Type': 'application/x-www-form-urlencoded'
-        }
-      }
-    );
-
-    // Always respond 200 to Twilio
-    res.status(200).send('OK');
+    res.send("✅ Record added to Airtable: " + record[0].id);
   } catch (err) {
-    console.error('❌ Error:', err.response?.data || err.message);
-    // Still respond 200 to prevent Twilio retries
-    res.status(200).send('OK');
+    console.error(err);
+    res.status(500).send("❌ Error adding record: " + err.message);
   }
 });
 
+// Default route
+app.get("/", (req, res) => {
+  res.send("🚀 Restaurant Bot Demo is running...");
+});
+
+// Server listen (Railway will use process.env.PORT)
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
