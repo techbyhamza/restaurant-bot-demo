@@ -1,31 +1,31 @@
 // index.js
-// Twilio WhatsApp -> Airtable (Orders) with debug routes
+// Express + Twilio Webhook -> Airtable via REST (axios) + optional Sheets logging
 require('dotenv').config();
+
 const express = require('express');
+const bodyParser = require('body-parser');
+const axios = require('axios');
 const { MessagingResponse } = require('twilio').twiml;
-const Airtable = require('airtable');
 
 const app = express();
-app.use(express.urlencoded({ extended: false })); // Twilio form-encoded body
 
-// ----- ENV -----
+// Twilio form-encoded payloads
+app.use(bodyParser.urlencoded({ extended: false }));
+
+// ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+
+// Optional Sheets logging (Apps Script Web App)
+const SHEETS_WEBAPP_URL = process.env.SHEETS_WEBAPP_URL || process.env.SHEETS_WEBAPP_URL?.trim();
+
+// Airtable (must be provided to save in Airtable)
+const AIRTABLE_API_KEY    = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_BASE_ID    = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Orders';
 
-// ----- Airtable Setup -----
-if (!AIRTABLE_API_KEY || !AIRTABLE_BASE_ID) {
-  console.warn('⚠️ Missing AIRTABLE_API_KEY or AIRTABLE_BASE_ID');
-}
-Airtable.configure({ apiKey: AIRTABLE_API_KEY });
-const base = Airtable.base(AIRTABLE_BASE_ID);
-const table = base(AIRTABLE_TABLE_NAME);
-
-// ----- Helpers -----
+// ---------- Helpers ----------
 const nowISO = () => new Date().toISOString();
 
-// سادہ parser: میسج سے item/qty/address نکالے
 function parseOrderText(text) {
   const body = (text || '').trim();
   if (!body) return { item: '', qty: 1, address: '' };
@@ -37,58 +37,87 @@ function parseOrderText(text) {
   const qty = qtyMatch ? parseInt(qtyMatch[2], 10) : 1;
 
   let address = '';
-  const addrIdx = body.toLowerCase().indexOf('address');
-  if (addrIdx !== -1) address = body.slice(addrIdx + 7).trim().replace(/^[:\- ]+/, '');
+  const idx = body.toLowerCase().indexOf('address');
+  if (idx !== -1) address = body.slice(idx + 7).trim().replace(/^[:\- ]+/, '');
 
   let item = body;
   if (qtyMatch) item = item.replace(qtyMatch[0], ' ');
-  if (addrIdx !== -1) item = item.slice(0, addrIdx).trim();
+  if (idx !== -1) item = item.slice(0, idx).trim();
   if (!item) item = 'Item';
 
   return { item, qty: isNaN(qty) ? 1 : qty, address };
 }
 
-// ----- Health route -----
+async function saveToAirtable(fields) {
+  if (!AIRTABLE_API_KEY || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE_NAME) {
+    throw new Error('Airtable ENV missing (AIRTABLE_API_KEY / AIRTABLE_BASE_ID / AIRTABLE_TABLE_NAME)');
+  }
+  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
+  const payload = {
+    records: [{ fields }],
+    typecast: true // single-selects/choices کو خود fit کر دے
+  };
+  const headers = {
+    Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+    'Content-Type': 'application/json'
+  };
+  const { data } = await axios.post(url, payload, { headers });
+  const id = data?.records?.[0]?.id;
+  return id;
+}
+
+async function optionalLogToSheets(row) {
+  if (!SHEETS_WEBAPP_URL) return;
+  try {
+    await axios.post(SHEETS_WEBAPP_URL, row);
+  } catch (e) {
+    console.warn('Sheets logging failed (ignored):', e?.message || String(e));
+  }
+}
+
+// ---------- Health / Debug ----------
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
     env: {
       AIRTABLE_API_KEY: !!AIRTABLE_API_KEY,
       AIRTABLE_BASE_ID: !!AIRTABLE_BASE_ID,
-      AIRTABLE_TABLE_NAME: AIRTABLE_TABLE_NAME
+      AIRTABLE_TABLE_NAME: AIRTABLE_TABLE_NAME,
+      SHEETS_WEBAPP_URL: !!SHEETS_WEBAPP_URL
     }
   });
 });
 
-// ----- Direct Airtable test (browser hit) -----
+// Direct test without Twilio (open in browser)
 app.get('/airtable-test', async (req, res) => {
   try {
-    const created = await table.create([{
-      fields: {
-        'Phone Number': '+61000000000',
-        'Order Item'  : 'Test Item',
-        'Quantity'    : 1,
-        'Address'     : 'Test Address',
-        'Status'      : 'Pending',
-        'Order Time'  : nowISO()
-      }
-    }], { typecast: true }); // single-selects کیلئے
-    res.json({ success: true, id: created?.[0]?.getId() });
+    const fields = {
+      'Phone Number': '+61000000000',
+      'Order Item'  : 'Test Item',
+      'Quantity'    : 1,
+      'Address'     : 'Test Address',
+      'Status'      : 'Pending',
+      'Order Time'  : nowISO()
+    };
+    const id = await saveToAirtable(fields);
+    res.json({ success: true, id });
   } catch (e) {
-    console.error('Airtable TEST error:', e?.statusCode, e?.message, e?.error || e);
+    console.error('Airtable TEST error:', e?.response?.data || e?.message || String(e));
     res.status(500).json({ success: false, error: e?.message || String(e) });
   }
 });
 
-// ----- Twilio WhatsApp webhook -----
+// ---------- Twilio WhatsApp Webhook ----------
 app.post('/whatsapp', async (req, res) => {
   const twiml = new MessagingResponse();
-  const from = (req.body.From || '').replace('whatsapp:', ''); // +61...
-  const body = req.body.Body || '';
-
-  const { item, qty, address } = parseOrderText(body);
 
   try {
+    const fromRaw = req.body.From || '';           // 'whatsapp:+61xxxx'
+    const from = fromRaw.replace('whatsapp:', ''); // '+61xxxx'
+    const body = req.body.Body || '';
+
+    const { item, qty, address } = parseOrderText(body);
+
     const fields = {
       'Phone Number': from,
       'Order Item'  : item,
@@ -98,9 +127,17 @@ app.post('/whatsapp', async (req, res) => {
       'Order Time'  : nowISO()
     };
 
-    const created = await table.create([{ fields }], { typecast: true });
-    const recId = created?.[0]?.getId();
-    console.log('✅ Airtable record created:', recId, fields);
+    // Save to Airtable (if keys provided)
+    let recId = '';
+    try {
+      recId = await saveToAirtable(fields);
+      console.log('✅ Airtable record created:', recId, fields);
+    } catch (err) {
+      console.error('❌ Airtable create error:', err?.response?.data || err?.message || String(err));
+      // We still reply to user; also try optional Sheets logging
+    }
+
+    await optionalLogToSheets({ ...fields, recordId: recId });
 
     const reply =
       `✅ محفوظ ہو گیا!\n• نمبر: ${from}\n• آئٹم: ${item}\n• مقدار: ${qty}\n` +
@@ -109,11 +146,14 @@ app.post('/whatsapp', async (req, res) => {
     twiml.message(reply);
     res.type('text/xml').send(twiml.toString());
   } catch (e) {
-    console.error('❌ Airtable create error:', { code: e?.statusCode, msg: e?.message, err: e?.error || e });
-    twiml.message('⚠️ اس وقت ریکارڈ محفوظ نہیں ہو سکا، میں چیک کر رہا ہوں۔');
-    res.type('text/xml').send(twiml.toString());
+    console.error('Webhook error:', e?.message || String(e));
+    const tw = new MessagingResponse();
+    tw.message('⚠️ اس وقت ریکارڈ محفوظ نہیں ہو سکا۔ بعد میں دوبارہ کوشش کریں۔');
+    res.type('text/xml').send(tw.toString());
   }
 });
 
-// ----- Start -----
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// ---------- Start ----------
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
