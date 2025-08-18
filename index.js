@@ -1,35 +1,40 @@
-// index.js — Uses your existing envs: AIRTABLE_PAT, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME
+// index.js — Flow with English menus, robust replies, uses your envs (AIRTABLE_PAT, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+// Reply is always immediate. Airtable save runs in background and is skipped safely if axios or keys are missing.
+
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const axios = require('axios');
 const { MessagingResponse } = require('twilio').twiml;
+
+// ⚠️ axios will be loaded lazily (inside save function) so missing package won't crash the server
+let axios = null;
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
 const PORT = process.env.PORT || 3000;
 
-// ✅ Use your existing variables (no new names)
-const AIRTABLE_PAT         = process.env.AIRTABLE_PAT;        // your API key (PAT)
-const AIRTABLE_BASE_ID     = process.env.AIRTABLE_BASE_ID;
-const AIRTABLE_TABLE_NAME  = process.env.AIRTABLE_TABLE_NAME || 'Orders';
-// (Optional info)
-const TWILIO_ACCOUNT_SID   = process.env.TWILIO_ACCOUNT_SID || '';
-const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || '';
+// ---- Your existing env variable names (do NOT change) ----
+const AIRTABLE_PAT        = process.env.AIRTABLE_PAT;
+const AIRTABLE_BASE_ID    = process.env.AIRTABLE_BASE_ID;
+const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Orders';
+// (optional info)
+const TWILIO_ACCOUNT_SID  = process.env.TWILIO_ACCOUNT_SID || '';
+const TWILIO_WHATSAPP_FROM= process.env.TWILIO_WHATSAPP_FROM || '';
 
-// In-memory sessions: { phone: { step, data } }
-const sessions = {};
+// ---- In-memory session store ----
+const sessions = {}; // { phone: { step, data } }
 
-// English menus (as requested)
+// ---- Menus (English only) ----
 const MENUS = {
   'Al Noor Pizza': ['Margherita', 'Pepperoni', 'BBQ Chicken'],
-  'First Choice': ['Zinger Burger', 'Shawarma', 'Club Sandwich']
+  'First Choice':  ['Zinger Burger', 'Shawarma', 'Club Sandwich']
 };
 
-// ---------- Helpers ----------
+// ---- Helpers ----
 const nowISO = () => new Date().toISOString();
 const log = (...a) => console.log('[BOT]', ...a);
+const norm = s => (s || '').trim().toLowerCase();
 
 function sendXml(res, text) {
   const tw = new MessagingResponse();
@@ -37,9 +42,7 @@ function sendXml(res, text) {
   res.type('text/xml').send(tw.toString());
 }
 
-const norm = s => (s || '').trim().toLowerCase();
-
-// match number (1..N) or contain text
+// match by number (1..N) or by containing option text
 function matchChoice(input, options) {
   const t = norm(input);
   const n = parseInt(t, 10);
@@ -50,41 +53,43 @@ function matchChoice(input, options) {
   return null;
 }
 
-// Background Airtable save — never blocks reply
+// ---- Background Airtable save (never blocks reply) ----
 function saveToAirtableBkg(fields) {
-  try {
-    if (!AIRTABLE_PAT || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE_NAME) {
-      return log('⚠️ Missing Airtable env, skip save');
-    }
-    const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
-    const headers = {
-      Authorization: `Bearer ${AIRTABLE_PAT}`,
-      'Content-Type': 'application/json'
-    };
-    const payload = { records: [{ fields }], typecast: true };
-
-    axios.post(url, payload, { headers, timeout: 5000 })
-      .then(r => log('✅ Airtable saved:', r?.data?.records?.[0]?.id))
-      .catch(e => log('❌ Airtable error:', e?.response?.data || e.message));
-  } catch (e) {
-    log('❌ Airtable exception:', e.message);
+  // If any required env is missing, skip quietly (but log)
+  if (!AIRTABLE_PAT || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE_NAME) {
+    return log('⚠️ Missing Airtable env — skipping save.', { hasPAT: !!AIRTABLE_PAT, hasBase: !!AIRTABLE_BASE_ID, table: AIRTABLE_TABLE_NAME });
   }
+  // lazy require axios; if not installed, skip safely
+  try {
+    if (!axios) axios = require('axios');
+  } catch (e) {
+    return log('⚠️ axios not installed — skipping Airtable save.');
+  }
+
+  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
+  const headers = { Authorization: `Bearer ${AIRTABLE_PAT}`, 'Content-Type': 'application/json' };
+  const payload = { records: [{ fields }], typecast: true };
+
+  axios.post(url, payload, { headers, timeout: 5000 })
+    .then(r => log('✅ Airtable saved:', r?.data?.records?.[0]?.id))
+    .catch(e => log('❌ Airtable save error:', e?.response?.data || e.message));
 }
 
-// ---------- Health ----------
+// ---- Health/Echo ----
 app.get('/', (_req, res) => res.send('OK - restaurant bot running'));
 app.get('/health', (_req, res) => res.json({
   ok: true,
   env: {
-    AIRTABLE_PAT: !!AIRTABLE_PAT,
-    AIRTABLE_BASE_ID: !!AIRTABLE_BASE_ID,
+    AIRTABLE_PAT:        !!AIRTABLE_PAT,
+    AIRTABLE_BASE_ID:    !!AIRTABLE_BASE_ID,
     AIRTABLE_TABLE_NAME: AIRTABLE_TABLE_NAME,
-    TWILIO_ACCOUNT_SID: !!TWILIO_ACCOUNT_SID,
-    TWILIO_WHATSAPP_FROM: !!TWILIO_WHATSAPP_FROM
+    TWILIO_ACCOUNT_SID:  !!TWILIO_ACCOUNT_SID,
+    TWILIO_WHATSAPP_FROM:!!TWILIO_WHATSAPP_FROM
   }
 }));
+app.all('/echo', (req, res) => res.json({ method: req.method, body: req.body, query: req.query }));
 
-// ---------- WhatsApp webhook ----------
+// ---- WhatsApp webhook ----
 app.post('/whatsapp', (req, res) => {
   const from = (req.body.From || '').replace('whatsapp:', '');
   const text = (req.body.Body || '').trim();
@@ -152,7 +157,7 @@ app.post('/whatsapp', (req, res) => {
       );
     }
 
-    // 5) Mode (Dine-in / Takeaway)
+    // 5) Mode
     if (s.step === 'mode') {
       const modes = ['Dine-in', 'Takeaway'];
       const idx = matchChoice(text, modes);
@@ -177,7 +182,7 @@ app.post('/whatsapp', (req, res) => {
       }
     }
 
-    // 6) Address (only when Takeaway)
+    // 6) Address (only for Takeaway)
     if (s.step === 'address') {
       if (!text || text.length < 3) {
         return sendXml(res, "Please provide a valid delivery address.");
@@ -202,10 +207,10 @@ app.post('/whatsapp', (req, res) => {
       }
       s.data.payment = pays[idx - 1];
 
-      // ----- Save to Airtable (your 6 columns only) -----
+      // ---- Save to Airtable (only your existing 6 columns) ----
       const fields = {
         'Phone Number': from,
-        'Order Item': `${s.data.item} @ ${s.data.restaurant}`, // restaurant included inline
+        'Order Item': `${s.data.item} @ ${s.data.restaurant}`, // keep restaurant within item
         'Quantity': s.data.quantity,
         'Address': s.data.mode === 'Takeaway' ? (s.data.address || '') : '',
         'Status': 'Pending',
@@ -227,14 +232,15 @@ app.post('/whatsapp', (req, res) => {
       return sendXml(res, confirmation);
     }
 
-    // fallback reset
+    // Fallback reset
     sessions[from] = { step: 'welcome', data: {} };
     return sendXml(res, 'Welcome! Please reply "Hi" to start again.');
+
   } catch (err) {
     console.error('🚨 Handler error:', err?.stack || err?.message);
     return sendXml(res, 'Temporary issue — please try again.');
   }
 });
 
-// Start server
+// ---- Start server ----
 app.listen(PORT, () => log(`Server running on port ${PORT}`));
