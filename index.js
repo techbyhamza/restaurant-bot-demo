@@ -1,246 +1,334 @@
-// index.js — Flow with English menus, robust replies, uses your envs (AIRTABLE_PAT, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
-// Reply is always immediate. Airtable save runs in background and is skipped safely if axios or keys are missing.
+// index.js — Guided Order Bot (stable, no double replies, instant 200, same env names)
+// ENV used: AIRTABLE_BASE_ID, AIRTABLE_PAT, AIRTABLE_TABLE_NAME, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM
 
 require('dotenv').config();
 const express = require('express');
-const bodyParser = require('body-parser');
-const { MessagingResponse } = require('twilio').twiml;
+const axios = require('axios');
+const qs = require('qs');
 
-// ⚠️ axios will be loaded lazily (inside save function) so missing package won't crash the server
-let axios = null;
-
-const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+const {
+  AIRTABLE_BASE_ID,
+  AIRTABLE_PAT,
+  AIRTABLE_TABLE_NAME,
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_WHATSAPP_FROM
+} = process.env;
 
 const PORT = process.env.PORT || 3000;
+const app = express();
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 
-// ---- Your existing env variable names (do NOT change) ----
-const AIRTABLE_PAT        = process.env.AIRTABLE_PAT;
-const AIRTABLE_BASE_ID    = process.env.AIRTABLE_BASE_ID;
-const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Orders';
-// (optional info)
-const TWILIO_ACCOUNT_SID  = process.env.TWILIO_ACCOUNT_SID || '';
-const TWILIO_WHATSAPP_FROM= process.env.TWILIO_WHATSAPP_FROM || '';
-
-// ---- In-memory session store ----
-const sessions = {}; // { phone: { step, data } }
-
-// ---- Menus (English only) ----
-const MENUS = {
-  'Al Noor Pizza': ['Margherita', 'Pepperoni', 'BBQ Chicken'],
-  'First Choice':  ['Zinger Burger', 'Shawarma', 'Club Sandwich']
-};
-
-// ---- Helpers ----
-const nowISO = () => new Date().toISOString();
-const log = (...a) => console.log('[BOT]', ...a);
-const norm = s => (s || '').trim().toLowerCase();
-
-function sendXml(res, text) {
-  const tw = new MessagingResponse();
-  tw.message(text);
-  res.type('text/xml').send(tw.toString());
+// ----------------- Idempotency Guard (avoid duplicate replies) -----------------
+const PROCESSED_SIDS = new Map(); // MessageSid -> timestamp
+function seenSid(sid) {
+  if (!sid) return false;
+  const now = Date.now();
+  // cleanup old
+  for (const [k, t] of PROCESSED_SIDS) if (now - t > 10 * 60 * 1000) PROCESSED_SIDS.delete(k);
+  if (PROCESSED_SIDS.has(sid)) return true;
+  PROCESSED_SIDS.set(sid, now);
+  return false;
 }
 
-// match by number (1..N) or by containing option text
-function matchChoice(input, options) {
-  const t = norm(input);
-  const n = parseInt(t, 10);
-  if (!isNaN(n) && n >= 1 && n <= options.length) return n;
-  for (let i = 0; i < options.length; i++) {
-    if (t.includes(norm(options[i]))) return i + 1;
+// ----------------- Restaurants & Menus -----------------
+const RESTAURANTS = [
+  {
+    key: 'alnoor',
+    name: 'Al Noor Pizza',
+    menu: [
+      { id: 1, name: 'Veg Pizza' },
+      { id: 2, name: 'Chicken Pizza' },
+      { id: 3, name: 'Cheese Garlic Bread' },
+      { id: 4, name: 'Coke 1.25L' }
+    ]
+  },
+  {
+    key: 'firstchoice',
+    name: 'First Choice',
+    menu: [
+      { id: 1, name: 'Chicken Biryani' },
+      { id: 2, name: 'Chicken Karahi' },
+      { id: 3, name: 'Tandoori Naan' },
+      { id: 4, name: 'Soft Drink' }
+    ]
   }
+];
+
+// ----------------- Conversation State -----------------
+// phone -> { step, restaurantKey, restaurantName, item, quantity, address, payment }
+const SESSION = Object.create(null);
+
+// Steps: 'restaurant' -> 'item' -> 'qty' -> 'address' -> 'payment' -> 'confirm'
+const PM_OPTIONS = [
+  { id: 1, key: 'cod',     label: 'Cash on Delivery' },
+  { id: 2, key: 'counter', label: 'Pay at Counter' },
+  { id: 3, key: 'card',    label: 'Card' }
+];
+
+// ----------------- Helpers -----------------
+function startSession(phone) {
+  SESSION[phone] = { step: 'restaurant' };
+  return SESSION[phone];
+}
+function resetSession(phone) {
+  delete SESSION[phone];
+  return startSession(phone);
+}
+
+function getRestaurantByIndex(i) {
+  return RESTAURANTS[i - 1] || null;
+}
+function getRestaurantByNameGuess(text) {
+  const t = (text || '').toLowerCase();
+  if (t.includes('al noor') || t.includes('alnoor')) return RESTAURANTS.find(r => r.key === 'alnoor');
+  if (t.includes('first choice') || t.includes('firstchoice')) return RESTAURANTS.find(r => r.key === 'firstchoice');
   return null;
 }
 
-// ---- Background Airtable save (never blocks reply) ----
-function saveToAirtableBkg(fields) {
-  // If any required env is missing, skip quietly (but log)
-  if (!AIRTABLE_PAT || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE_NAME) {
-    return log('⚠️ Missing Airtable env — skipping save.', { hasPAT: !!AIRTABLE_PAT, hasBase: !!AIRTABLE_BASE_ID, table: AIRTABLE_TABLE_NAME });
-  }
-  // lazy require axios; if not installed, skip safely
-  try {
-    if (!axios) axios = require('axios');
-  } catch (e) {
-    return log('⚠️ axios not installed — skipping Airtable save.');
-  }
-
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
-  const headers = { Authorization: `Bearer ${AIRTABLE_PAT}`, 'Content-Type': 'application/json' };
-  const payload = { records: [{ fields }], typecast: true };
-
-  axios.post(url, payload, { headers, timeout: 5000 })
-    .then(r => log('✅ Airtable saved:', r?.data?.records?.[0]?.id))
-    .catch(e => log('❌ Airtable save error:', e?.response?.data || e.message));
+function renderRestaurantsPrompt() {
+  const lines = RESTAURANTS.map((r, i) => `${i + 1}. ${r.name}`).join('\n');
+  return `🏪 *Select a restaurant*\n${lines}\n\nReply with a number (e.g. *1*) or name (e.g. *Al Noor*).`;
+}
+function renderMenuPrompt(restaurant) {
+  const lines = restaurant.menu.map(m => `${m.id}. ${m.name}`).join('\n');
+  return `📋 *${restaurant.name} Menu*\n${lines}\n\nPlease send *item number* or *exact item name*.`;
+}
+function renderQtyPrompt(itemName) {
+  return `🧮 *Quantity for* "${itemName}"?\nReply with a number (e.g. *2*).`;
+}
+function renderAddressPrompt() {
+  return `📍 *Please share your delivery address* (street, suburb, postcode).`;
+}
+function renderPaymentPrompt() {
+  const opts = PM_OPTIONS.map(p => `${p.id}. ${p.label}`).join('\n');
+  return `💳 *Choose payment method*\n${opts}\n\nReply with a number (e.g. *1*).`;
+}
+function renderSummary(s) {
+  return `🧾 *Order Summary*\n` +
+    `Restaurant: ${s.restaurantName}\n` +
+    `Item: ${s.item}\n` +
+    `Quantity: ${s.quantity}\n` +
+    `Address: ${s.address}\n` +
+    `Payment: ${s.payment}\n\n` +
+    `✅ Thanks! Your order has been placed. Status: *Pending*.`;
 }
 
-// ---- Health/Echo ----
-app.get('/', (_req, res) => res.send('OK - restaurant bot running'));
-app.get('/health', (_req, res) => res.json({
-  ok: true,
-  env: {
-    AIRTABLE_PAT:        !!AIRTABLE_PAT,
-    AIRTABLE_BASE_ID:    !!AIRTABLE_BASE_ID,
-    AIRTABLE_TABLE_NAME: AIRTABLE_TABLE_NAME,
-    TWILIO_ACCOUNT_SID:  !!TWILIO_ACCOUNT_SID,
-    TWILIO_WHATSAPP_FROM:!!TWILIO_WHATSAPP_FROM
+async function sendWA(to, body) {
+  const basicAuth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  console.log('[WA ->]', body);
+  return axios.post(
+    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+    qs.stringify({ To: to, From: TWILIO_WHATSAPP_FROM, Body: body }),
+    { headers: { Authorization: `Basic ${basicAuth}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 8000 }
+  ).catch(err => {
+    console.error('[WA send error]', err.response?.data || err.message);
+  });
+}
+
+/** Airtable save with auto-fallback (Full → Minimal). Never throws. */
+async function saveAirtableSafe(order) {
+  if (!AIRTABLE_BASE_ID || !AIRTABLE_PAT || !AIRTABLE_TABLE_NAME) {
+    console.warn('[AT] Missing env — skip save');
+    return false;
   }
-}));
-app.all('/echo', (req, res) => res.json({ method: req.method, body: req.body, query: req.query }));
+  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
+  const headers = { Authorization: `Bearer ${AIRTABLE_PAT}`, 'Content-Type': 'application/json' };
 
-// ---- WhatsApp webhook ----
-app.post('/whatsapp', (req, res) => {
-  const from = (req.body.From || '').replace('whatsapp:', '');
-  const text = (req.body.Body || '').trim();
-  log('📩 Incoming', { from, text, at: nowISO() });
-
-  if (!sessions[from]) sessions[from] = { step: 'welcome', data: {} };
-  const s = sessions[from];
+  const payloadFull = {
+    fields: {
+      'Phone Number': order.phone,
+      'Restaurant': order.restaurantName,
+      'Order Item': order.item,
+      'Quantity': order.quantity,
+      'Address': order.address,
+      'Payment Method': order.payment,  // may fail if field/options not set
+      'Status': 'Pending',
+      'Order Time': new Date().toISOString()
+    }
+  };
+  const payloadMinimal = {
+    fields: {
+      'Phone Number': order.phone,
+      'Restaurant': order.restaurantName,
+      'Order Item': order.item,
+      'Quantity': order.quantity,
+      'Address': order.address,
+      'Order Time': new Date().toISOString()
+    }
+  };
 
   try {
-    // 1) Welcome
-    if (s.step === 'welcome') {
-      s.step = 'restaurant';
-      return sendXml(res,
-        "👋 Welcome! Please choose a restaurant:\n" +
-        "1) Al Noor Pizza\n" +
-        "2) First Choice\n\n" +
-        "Reply with 1 or 2."
-      );
+    console.log('[AT] Save FULL…');
+    await axios.post(url, payloadFull, { headers, timeout: 8000 });
+    console.log('[AT] Saved FULL');
+    return true;
+  } catch (e) {
+    console.warn('[AT] FULL failed:', e?.response?.status, e?.response?.data || e.message);
+    try {
+      console.log('[AT] Save MINIMAL…');
+      await axios.post(url, payloadMinimal, { headers, timeout: 8000 });
+      console.log('[AT] Saved MINIMAL');
+      return true;
+    } catch (e2) {
+      console.error('[AT] MINIMAL failed:', e2?.response?.status, e2?.response?.data || e2.message);
+      return false;
+    }
+  }
+}
+
+// ----------------- Routes -----------------
+app.get('/', (_req, res) => res.send('🚀 Guided Order Bot (stable) running!'));
+
+app.post('/whatsapp', async (req, res) => {
+  const sid = req.body.MessageSid;         // Twilio message id (for dedupe)
+  const fromFull = req.body.From || '';
+  const phone = fromFull.replace('whatsapp:', '');
+  const raw = (req.body.Body || '').trim();
+
+  // 1) Immediately ACK to Twilio to prevent retries (very important)
+  res.status(200).send('OK');
+
+  // 2) Dedupe repeated webhooks (Twilio may retry)
+  if (seenSid(sid)) {
+    console.log('[IN DUPLICATE]', { sid, phone, raw });
+    return;
+  }
+
+  try {
+    console.log('[IN]', { sid, phone, raw });
+    const toReply = fromFull;
+    const lower = raw.toLowerCase();
+
+    // Start / Restart
+    if (['hi', 'hello', 'start'].includes(lower)) {
+      resetSession(phone);
+      await sendWA(toReply, `👋 Welcome!\n${renderRestaurantsPrompt()}`);
+      return;
+    }
+    if (lower === 'restart' || lower === 'reset') {
+      resetSession(phone);
+      await sendWA(toReply, `🔄 Flow restarted.\n${renderRestaurantsPrompt()}`);
+      return;
     }
 
-    // 2) Restaurant
+    // Ensure session
+    const s = SESSION[phone] || startSession(phone);
+
+    // STEP: restaurant
     if (s.step === 'restaurant') {
-      const rChoices = ['Al Noor Pizza', 'First Choice'];
-      const idx = matchChoice(text, rChoices);
-      if (!idx) {
-        return sendXml(res, "Please reply with 1 or 2:\n1) Al Noor Pizza\n2) First Choice");
-      }
-      s.data.restaurant = rChoices[idx - 1];
+      let chosen = null;
+      const num = raw.match(/^\s*r?\s*(\d+)\s*$/i);
+      if (num) chosen = getRestaurantByIndex(parseInt(num[1], 10));
+      if (!chosen) chosen = getRestaurantByNameGuess(raw);
 
-      const menu = MENUS[s.data.restaurant].map((x, i) => `${i + 1}) ${x}`).join('\n');
-      s.step = 'menu';
-      return sendXml(res,
-        `You chose: ${s.data.restaurant}\n\n` +
-        `Menu:\n${menu}\n\n` +
-        `Please send the item number (e.g., 1).`
-      );
+      if (!chosen) {
+        await sendWA(toReply, `❌ Invalid choice.\n${renderRestaurantsPrompt()}`);
+        return;
+      }
+
+      s.restaurantKey = chosen.key;
+      s.restaurantName = chosen.name;
+      s.step = 'item';
+      await sendWA(toReply, `✅ Selected: *${s.restaurantName}*\n\n${renderMenuPrompt(chosen)}\n\n(Type *restart* anytime to start over.)`);
+      return;
     }
 
-    // 3) Menu item
-    if (s.step === 'menu') {
-      const items = MENUS[s.data.restaurant] || [];
-      const idx = matchChoice(text, items);
-      if (!idx) {
-        const menu = items.map((x, i) => `${i + 1}) ${x}`).join('\n');
-        return sendXml(res, `Please send a valid item number:\n${menu}`);
+    // STEP: item
+    if (s.step === 'item') {
+      const rest = RESTAURANTS.find(r => r.key === s.restaurantKey);
+      if (!rest) {
+        s.step = 'restaurant';
+        await sendWA(toReply, renderRestaurantsPrompt());
+        return;
       }
-      s.data.item = items[idx - 1];
-      s.step = 'quantity';
-      return sendXml(res, `Great choice: ${s.data.item}!\nHow many would you like? (e.g., 2)`);
+
+      let itemObj = null;
+      const byNum = raw.match(/^\s*(\d+)\s*$/);
+      if (byNum) itemObj = rest.menu.find(m => m.id === parseInt(byNum[1], 10));
+      if (!itemObj) {
+        itemObj =
+          rest.menu.find(m => raw.toLowerCase().includes(m.name.toLowerCase())) ||
+          rest.menu.find(m => m.name.toLowerCase().includes(raw.toLowerCase()));
+      }
+
+      if (!itemObj) {
+        await sendWA(toReply, `❌ Item not found.\n${renderMenuPrompt(rest)}`);
+        return;
+      }
+
+      s.item = itemObj.name;
+      s.step = 'qty';
+      await sendWA(toReply, renderQtyPrompt(s.item));
+      return;
     }
 
-    // 4) Quantity
-    if (s.step === 'quantity') {
-      const qty = parseInt(text, 10);
-      if (isNaN(qty) || qty < 1) {
-        return sendXml(res, "Please send a valid quantity (e.g., 2).");
+    // STEP: qty
+    if (s.step === 'qty') {
+      const q = parseInt(raw, 10);
+      if (!q || q < 1 || q > 999) {
+        await sendWA(toReply, `❌ Please send a valid quantity (1-999).\n${renderQtyPrompt(s.item)}`);
+        return;
       }
-      s.data.quantity = qty;
-      s.step = 'mode';
-      return sendXml(res,
-        "Choose order mode:\n" +
-        "1) Dine-in\n" +
-        "2) Takeaway\n\n" +
-        "Reply with 1 or 2."
-      );
+      s.quantity = q;
+      s.step = 'address';
+      await sendWA(toReply, renderAddressPrompt());
+      return;
     }
 
-    // 5) Mode
-    if (s.step === 'mode') {
-      const modes = ['Dine-in', 'Takeaway'];
-      const idx = matchChoice(text, modes);
-      if (!idx) {
-        return sendXml(res, "Please reply with 1 or 2:\n1) Dine-in\n2) Takeaway");
-      }
-      s.data.mode = modes[idx - 1];
-
-      if (s.data.mode === 'Takeaway') {
-        s.step = 'address';
-        return sendXml(res, "Please type your delivery address.");
-      } else {
-        s.data.address = ''; // dine-in → no address
-        s.step = 'payment';
-        return sendXml(res,
-          "Select payment method:\n" +
-          "1) Pay at Counter\n" +
-          "2) Cash on Delivery\n" +
-          "3) Online Payment\n\n" +
-          "Reply with 1, 2, or 3."
-        );
-      }
-    }
-
-    // 6) Address (only for Takeaway)
+    // STEP: address
     if (s.step === 'address') {
-      if (!text || text.length < 3) {
-        return sendXml(res, "Please provide a valid delivery address.");
+      if (!raw || raw.length < 5) {
+        await sendWA(toReply, `❌ Address looks too short.\n${renderAddressPrompt()}`);
+        return;
       }
-      s.data.address = text;
+      s.address = raw;
       s.step = 'payment';
-      return sendXml(res,
-        "Select payment method:\n" +
-        "1) Pay at Counter\n" +
-        "2) Cash on Delivery\n" +
-        "3) Online Payment\n\n" +
-        "Reply with 1, 2, or 3."
-      );
+      await sendWA(toReply, renderPaymentPrompt());
+      return;
     }
 
-    // 7) Payment
+    // STEP: payment
     if (s.step === 'payment') {
-      const pays = ['Pay at Counter', 'Cash on Delivery', 'Online Payment'];
-      const idx = matchChoice(text, pays);
-      if (!idx) {
-        return sendXml(res, "Please reply with 1, 2, or 3:\n1) Pay at Counter\n2) Cash on Delivery\n3) Online Payment");
+      let pm = null;
+      const pmNum = raw.match(/^\s*(\d+)\s*$/);
+      if (pmNum) pm = PM_OPTIONS.find(p => p.id === parseInt(pmNum[1], 10));
+      if (!pm) {
+        const found = PM_OPTIONS.find(p => p.label.toLowerCase() === raw.toLowerCase());
+        if (found) pm = found;
       }
-      s.data.payment = pays[idx - 1];
+      if (!pm) {
+        await sendWA(toReply, `❌ Invalid choice.\n${renderPaymentPrompt()}`);
+        return;
+      }
 
-      // ---- Save to Airtable (only your existing 6 columns) ----
-      const fields = {
-        'Phone Number': from,
-        'Order Item': `${s.data.item} @ ${s.data.restaurant}`, // keep restaurant within item
-        'Quantity': s.data.quantity,
-        'Address': s.data.mode === 'Takeaway' ? (s.data.address || '') : '',
-        'Status': 'Pending',
-        'Order Time': nowISO()
-      };
-      saveToAirtableBkg(fields);
+      s.payment = pm.label;
+      s.step = 'confirm';
 
-      const confirmation =
-        `✅ Order confirmed!\n\n` +
-        `Restaurant: ${s.data.restaurant}\n` +
-        `Item: ${s.data.item}\n` +
-        `Quantity: ${s.data.quantity}\n` +
-        `Mode: ${s.data.mode}\n` +
-        (s.data.mode === 'Takeaway' ? `Address: ${s.data.address}\n` : '') +
-        `Payment: ${s.data.payment}\n` +
-        `Thank you!`;
+      // Fire-and-forget: save then send ONE confirmation (no extra follow-ups)
+      saveAirtableSafe({
+        phone,
+        restaurantName: s.restaurantName,
+        item: s.item,
+        quantity: s.quantity,
+        address: s.address,
+        payment: s.payment
+      }).catch(()=>{});
 
-      delete sessions[from];
-      return sendXml(res, confirmation);
+      await sendWA(toReply, renderSummary(s));
+      resetSession(phone); // end session; no more messages after confirmation
+      return;
     }
 
-    // Fallback reset
-    sessions[from] = { step: 'welcome', data: {} };
-    return sendXml(res, 'Welcome! Please reply "Hi" to start again.');
-
+    // Fallback: tell current step
+    await sendWA(toReply, `ℹ️ Let's continue your order.\nCurrent step: *${s.step}*`);
   } catch (err) {
-    console.error('🚨 Handler error:', err?.stack || err?.message);
-    return sendXml(res, 'Temporary issue — please try again.');
+    console.error('❌ Handler error:', err.response?.data || err.message);
+    // try a single generic reply (non-blocking)
+    try { if (req.body.From) await sendWA(req.body.From, '⚠️ Something went wrong. Type *restart* to start over.'); } catch(_) {}
   }
 });
 
-// ---- Start server ----
-app.listen(PORT, () => log(`Server running on port ${PORT}`));
+// Start
+app.listen(PORT, () => console.log(`✅ Guided Order Bot (stable) on ${PORT}`));
