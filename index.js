@@ -1,26 +1,29 @@
-// index.js — Guided Order Bot (envs adjusted to AIRTABLE_API_KEY + robust flow)
+// index.js — Guided Order Bot (AIRTABLE_API_KEY envs + SEND_WA toggle)
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const qs = require('qs');
 
 const {
-  AIRTABLE_API_KEY,       // <- changed name
+  AIRTABLE_API_KEY,
   AIRTABLE_BASE_ID,
   AIRTABLE_TABLE_NAME,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_WHATSAPP_FROM
+  TWILIO_WHATSAPP_FROM,
+  SEND_WA // "1" to actually send via Twilio; "0" to log-only
 } = process.env;
 
+const SEND_WHATSAPP = SEND_WA !== '0'; // default true
 const PORT = process.env.PORT || 3000;
+
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// ---------- Idempotency & Debounce ----------
-const PROCESSED_SIDS = new Map();      // MessageSid -> ts
-const LAST_USER_MSG  = new Map();      // phone -> { text, at, step }
+// -------- Idempotency & Debounce --------
+const PROCESSED_SIDS = new Map();
+const LAST_USER_MSG  = new Map();
 function seenSid(sid){
   if(!sid) return false;
   const now=Date.now();
@@ -35,7 +38,7 @@ function nearDuplicate(phone, text, step){
   return prev && prev.step===step && prev.text===text && (now - prev.at) < 8000;
 }
 
-// ---------- Restaurants & Menus ----------
+// -------- Data --------
 const RESTAURANTS = [
   { key:'alnoor', name:'Al Noor Pizza',
     menu:[ {id:1,name:'Veg Pizza'}, {id:2,name:'Chicken Pizza'}, {id:3,name:'Cheese Garlic Bread'}, {id:4,name:'Coke 1.25L'} ] },
@@ -43,7 +46,6 @@ const RESTAURANTS = [
     menu:[ {id:1,name:'Chicken Biryani'}, {id:2,name:'Chicken Karahi'}, {id:3,name:'Tandoori Naan'}, {id:4,name:'Soft Drink'} ] }
 ];
 
-// ---------- Conversation State ----------
 const SESSION = Object.create(null); // phone -> { step, ... }
 const PM_OPTIONS = [
   { id:1, key:'cod',     label:'Cash on Delivery' },
@@ -51,7 +53,7 @@ const PM_OPTIONS = [
   { id:3, key:'card',    label:'Card'             },
 ];
 
-// ---------- Helpers ----------
+// -------- Helpers --------
 const norm = s => (s||'').trim().toLowerCase();
 function startSession(phone){ SESSION[phone]={ step:'restaurant' }; return SESSION[phone]; }
 function resetSession(phone){ delete SESSION[phone]; return startSession(phone); }
@@ -62,6 +64,7 @@ function getRestaurantByNameGuess(t){
   if(x.includes('first choice')||x.includes('firstchoice')) return RESTAURANTS.find(r=>r.key==='firstchoice');
   return null;
 }
+
 const renderRestaurantsPrompt = () => {
   const lines = RESTAURANTS.map((r,i)=>`${i+1}. ${r.name}`).join('\n');
   return `👋 Welcome!\n\n🏪 *Select a restaurant*\n${lines}\n\nReply with a number (e.g. *1*) or name (e.g. *Al Noor*).\n(Type *restart* anytime.)`;
@@ -79,8 +82,12 @@ const renderPaymentPrompt = () => {
 const renderSummary = s =>
   `🧾 *Order Summary*\nRestaurant: ${s.restaurantName}\nItem: ${s.item}\nQuantity: ${s.quantity}\nAddress: ${s.address}\nPayment: ${s.payment}\n\n✅ Thanks! Your order has been placed. Status: *Pending*.`;
 
-// Twilio send
+// Twilio send (respects SEND_WHATSAPP)
 async function sendWA(to, body){
+  if (!SEND_WHATSAPP) {
+    console.log('[WA LOG-ONLY]', { to, body });
+    return;
+  }
   const basicAuth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
   return axios.post(
     `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
@@ -103,7 +110,7 @@ async function saveAirtableSafe(order){
     'Order Item'  : order.item,
     'Quantity'    : order.quantity,
     'Address'     : order.address,
-    'Payment Method': order.payment, // may fail if field/options mismatch
+    'Payment Method': order.payment,
     'Status'      : 'Pending',
     'Order Time'  : new Date().toISOString()
   }};
@@ -131,24 +138,22 @@ async function saveAirtableSafe(order){
   }
 }
 
-// ---------- Routes ----------
-app.get('/', (_req,res)=>res.send('🚀 Guided Order Bot (AIRTABLE_API_KEY) running'));
+// -------- Routes --------
+app.get('/', (_req,res)=>res.send(`🚀 Guided Order Bot running (SEND_WA=${SEND_WHATSAPP?'1':'0'})`));
 
 app.post('/whatsapp', async (req,res)=>{
-  const sid     = req.body.MessageSid;
-  const from    = req.body.From || '';
-  const phone   = from.replace('whatsapp:', '');
-  const raw     = (req.body.Body||'').trim();
+  const sid   = req.body.MessageSid;
+  const from  = req.body.From || '';
+  const phone = from.replace('whatsapp:', '');
+  const raw   = (req.body.Body||'').trim();
 
-  // Instant ACK (prevents Twilio retry)
-  res.status(200).send('OK');
+  res.status(200).send('OK'); // instant ACK
+  if (seenSid(sid)) return;
 
-  if (seenSid(sid)) return; // dedupe
   try{
     const lower = norm(raw);
     const toReply = from;
 
-    // Start / Restart
     if(['hi','hello','start'].includes(lower)){
       resetSession(phone);
       await sendWA(toReply, renderRestaurantsPrompt());
@@ -160,10 +165,8 @@ app.post('/whatsapp', async (req,res)=>{
       return;
     }
 
-    // Ensure session
     const s = SESSION[phone] || startSession(phone);
 
-    // Restaurant
     if(s.step==='restaurant'){
       let chosen=null;
       const num = raw.match(/^\s*(\d+)\s*$/);
@@ -176,7 +179,6 @@ app.post('/whatsapp', async (req,res)=>{
       await sendWA(toReply, renderMenuPrompt(chosen)); return;
     }
 
-    // Item
     if(s.step==='item'){
       const rest = RESTAURANTS.find(r=>r.key===s.restaurantKey);
       if(!rest){ s.step='restaurant'; await sendWA(toReply, renderRestaurantsPrompt()); return; }
@@ -192,7 +194,6 @@ app.post('/whatsapp', async (req,res)=>{
       await sendWA(toReply, renderQtyPrompt(s.item)); return;
     }
 
-    // Quantity
     if(s.step==='qty'){
       const q=parseInt(raw,10);
       if(!q || q<1 || q>999){ await sendWA(toReply, `❌ Please send a valid quantity (1-999).\n\n${renderQtyPrompt(s.item)}`); return; }
@@ -200,7 +201,6 @@ app.post('/whatsapp', async (req,res)=>{
       await sendWA(toReply, renderAddressPrompt()); return;
     }
 
-    // Address
     if(s.step==='address'){
       if(nearDuplicate(phone, raw, 'address')){ s.step='payment'; await sendWA(toReply, renderPaymentPrompt()); return; }
       if(!raw || raw.length<3){ await sendWA(toReply, `❌ Address looks too short.\n\n${renderAddressPrompt()}`); return; }
@@ -208,10 +208,9 @@ app.post('/whatsapp', async (req,res)=>{
       await sendWA(toReply, renderPaymentPrompt()); return;
     }
 
-    // Payment
     if(s.step==='payment'){
       let pm=null;
-      const numMatch = raw.match(/^\s*(\d+)[\s\.\)]*.*$/); // accepts: "1", "1.", "1) ..."
+      const numMatch = raw.match(/^\s*(\d+)[\s\.\)]*.*$/);
       if(numMatch) pm = PM_OPTIONS.find(p=>p.id===parseInt(numMatch[1],10));
       if(!pm){
         const synonyms = {
@@ -226,7 +225,7 @@ app.post('/whatsapp', async (req,res)=>{
 
       s.payment=pm.label; s.step='confirm';
 
-      // Save (fire-and-forget)
+      // save (fire-and-forget)
       saveAirtableSafe({
         phone,
         restaurantName:s.restaurantName,
@@ -235,11 +234,9 @@ app.post('/whatsapp', async (req,res)=>{
       }).catch(()=>{});
 
       await sendWA(toReply, renderSummary(s));
-      resetSession(phone); // end
-      return;
+      resetSession(phone); return;
     }
 
-    // Fallback
     await sendWA(toReply, `ℹ️ Let's continue your order.\nCurrent step: *${s.step}*`);
   }catch(err){
     console.error('❌ Handler error:', err.response?.data || err.message);
@@ -247,5 +244,4 @@ app.post('/whatsapp', async (req,res)=>{
   }
 });
 
-// Start
-app.listen(PORT, ()=>console.log(`✅ Guided Order Bot (AIRTABLE_API_KEY) on ${PORT}`));
+app.listen(PORT, ()=>console.log(`✅ Guided Order Bot on ${PORT} (SEND_WA=${SEND_WHATSAPP?'1':'0'})`));
