@@ -1,7 +1,7 @@
-// index.js — EN-only WhatsApp Restaurant Bot with 7-option main menu
-// Env needed: ACCESS_TOKEN, PHONE_NUMBER_ID, VERIFY_TOKEN,
+// index.js — EN WhatsApp bot (numbers-based menu, 2 payment options)
+// ENV needed: ACCESS_TOKEN, PHONE_NUMBER_ID, VERIFY_TOKEN,
 //             AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME,
-//             RESTAURANT_NAME (e.g., "Crystal Leets")
+//             RESTAURANT_NAME (default: Al Noor Peda)
 
 import express from "express";
 import axios from "axios";
@@ -9,7 +9,6 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-// ---------- ENV ----------
 const {
   ACCESS_TOKEN,
   PHONE_NUMBER_ID,
@@ -17,45 +16,38 @@ const {
   AIRTABLE_API_KEY,
   AIRTABLE_BASE_ID,
   AIRTABLE_TABLE_NAME,
-  RESTAURANT_NAME = "My Restaurant",
+  RESTAURANT_NAME = "Al Noor Peda",
 } = process.env;
 
 const WA_URL = `https://graph.facebook.com/v23.0/${PHONE_NUMBER_ID}/messages`;
 
-// ---------- SIMPLE SESSION STORE ----------
+// -------- session store --------
 const sessions = new Map();
 /*
-  session = {
-    step: 'menu' | 'ask_type' | 'ask_item' | 'ask_qty' | 'ask_address' | 'ask_payment' | 'confirm',
-    orderType: 'Delivery' | 'Takeaway' | 'Dine-in',
-    itemCode: string, orderItem: string, quantity: number, address: string,
-    paymentMethod: 'Cash'|'Card'
-  }
+  step: 'menu'|'ask_type'|'ask_item'|'ask_qty'|'ask_address'|'ask_payment'|'confirm'
 */
-
-// ---------- DEMO MENU (edit freely) ----------
 const MENU = [
-  { code: "B1", name: "Beef Burger", price: 8.99 },
+  { code: "P1", name: "Margherita Pizza (8\")", price: 9.5 },
+  { code: "P2", name: "Pepperoni Pizza (8\")", price: 11.5 },
   { code: "C1", name: "Chicken Burger", price: 7.99 },
-  { code: "P1", name: "Pepperoni Pizza (8\")", price: 11.5 },
-  { code: "P2", name: "Veggie Pizza (8\")", price: 10.5 },
-  { code: "S1", name: "Greek Salad", price: 6.5 },
-  { code: "D1", name: "Chocolate Donut", price: 2.5 },
+  { code: "B1", name: "Beef Burger", price: 8.99 },
+  { code: "S1", name: "Chicken Shawarma", price: 6.5 },
+  { code: "B2", name: "Chicken Biryani", price: 8.0 },
+  { code: "D1", name: "Gulab Jamun (2 pcs)", price: 3.0 },
 ];
 
-function menuText() {
+function menuTextNumbered() {
   const lines = MENU.map(
-    (m) => `• ${m.code} — ${m.name} ($${m.price.toFixed(2)})`
+    (m, i) => `${i + 1}) ${m.name} — $${m.price.toFixed(2)}  [${m.code}]`
   );
   return [
-    `Here is our menu 📋`,
+    "Here is our menu 📋",
     ...lines,
     "",
-    "Reply with the **item code** (e.g., B1) to order.",
+    "Reply with the **number** (e.g., 1) or **code** (e.g., P1).",
   ].join("\n");
 }
 
-// ---------- WHATSAPP SEND ----------
 async function sendText(to, body) {
   try {
     await axios.post(
@@ -68,7 +60,20 @@ async function sendText(to, body) {
   }
 }
 
-// ---------- HELPERS ----------
+function showMainMenu() {
+  return [
+    `Welcome to *${RESTAURANT_NAME}* 👋`,
+    `Please choose an option (1–7):`,
+    `1) View Menu`,
+    `2) Order — Delivery`,
+    `3) Order — Takeaway`,
+    `4) Order — Dine‑in`,
+    `5) Check Order Status (coming soon)`,
+    `6) Talk to a Human (coming soon)`,
+    `7) Help / Restart`,
+  ].join("\n");
+}
+
 function getFrom(payload) {
   return (
     payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from ||
@@ -89,23 +94,11 @@ function getIncomingText(payload) {
   return "";
 }
 
-function showMainMenu() {
-  return [
-    `Welcome to *${RESTAURANT_NAME}* 👋`,
-    `Please choose an option (1–7):`,
-    `1) View Menu`,
-    `2) Order — Delivery`,
-    `3) Order — Takeaway`,
-    `4) Order — Dine‑in`,
-    `5) Check Order Status (coming soon)`,
-    `6) Talk to a Human (coming soon)`,
-    `7) Help / Restart`,
-  ].join("\n");
-}
-
-function findItemByCode(code) {
-  const c = (code || "").trim().toUpperCase();
-  return MENU.find((m) => m.code === c) || null;
+function findItemByNumberOrCode(txt) {
+  const t = (txt || "").trim().toUpperCase();
+  const n = parseInt(t, 10);
+  if (!isNaN(n) && n >= 1 && n <= MENU.length) return MENU[n - 1];
+  return MENU.find((m) => m.code === t) || null;
 }
 
 function parseQty(txt) {
@@ -114,25 +107,22 @@ function parseQty(txt) {
 }
 
 function orderSummary(s) {
-  const itemLine = s.orderItem
-    ? `${s.orderItem}${s.quantity ? ` x${s.quantity}` : ""}`
-    : "—";
-  const parts = [
+  const lines = [
     "Order Summary ✅",
     `• Type: ${s.orderType}`,
-    `• Item: ${itemLine}`,
-    s.orderType === "Delivery" ? `• Address: ${s.address || "—"}` : null,
-    `• Payment: ${s.paymentMethod || "—"}`,
-  ].filter(Boolean);
-  return parts.join("\n");
+    `• Item: ${s.orderItem}${s.quantity ? ` x${s.quantity}` : ""}`,
+  ];
+  if (s.orderType === "Delivery") lines.push(`• Address: ${s.address || "—"}`);
+  lines.push(`• Payment: ${s.paymentMethod || "—"}`);
+  return lines.join("\n");
 }
 
-// ---------- AIRTABLE ----------
+// ---------- Airtable save with fallback ----------
 async function saveToAirtable(s, phone) {
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
+  const baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
     AIRTABLE_TABLE_NAME
   )}`;
-  const fields = {
+  const full = {
     "Phone Number": phone,
     "Order Item": s.orderItem || "",
     "Quantity": s.quantity || 1,
@@ -143,10 +133,18 @@ async function saveToAirtable(s, phone) {
     "Payment Method": s.paymentMethod || "",
     "Payment Status": "N/A",
   };
+  const minimal = {
+    "Phone Number": phone,
+    "Quantity": s.quantity || 1,
+    "Address": s.address || "",
+    "Status": "Pending",
+    "Order Time": new Date().toISOString(),
+    "Order Type": s.orderType || "",
+  };
   try {
-    const r = await axios.post(
-      url,
-      { records: [{ fields }] },
+    await axios.post(
+      baseUrl,
+      { records: [{ fields: full }] },
       {
         headers: {
           Authorization: `Bearer ${AIRTABLE_API_KEY}`,
@@ -154,55 +152,64 @@ async function saveToAirtable(s, phone) {
         },
       }
     );
-    return !!r?.data;
-  } catch (e) {
-    console.error("Airtable save error:", e?.response?.data || e.message);
-    return false;
+    return true;
+  } catch (e1) {
+    console.error("Airtable full save error:", e1?.response?.data || e1.message);
+    try {
+      await axios.post(
+        baseUrl,
+        { records: [{ fields: minimal }] },
+        {
+          headers: {
+            Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      return true;
+    } catch (e2) {
+      console.error(
+        "Airtable minimal save error:",
+        e2?.response?.data || e2.message
+      );
+      return false;
+    }
   }
 }
 
-// ---------- FLOW ----------
+// ---------- flow ----------
 async function route(from, text) {
-  // bootstrap session
   if (!sessions.has(from)) {
     sessions.set(from, { step: "menu" });
     await sendText(from, showMainMenu());
     return;
   }
-
   const s = sessions.get(from);
   const msg = (text || "").trim();
 
-  // global restart
   if (/^(7|help|restart|reset)$/i.test(msg)) {
     sessions.set(from, { step: "menu" });
     await sendText(from, "Restarted. 👇\n" + showMainMenu());
     return;
   }
 
-  // -------- main menu --------
   if (s.step === "menu") {
-    if (/^1$/.test(msg) || /^view menu$/i.test(msg)) {
-      await sendText(from, menuText());
-      // stay in menu, allow immediate code entry
+    if (/^1$/.test(msg)) {
       s.step = "ask_item_from_menu";
+      await sendText(from, menuTextNumbered());
       return;
     }
-    if (/^2$/.test(msg)) {
-      s.orderType = "Delivery";
-    } else if (/^3$/.test(msg)) {
-      s.orderType = "Takeaway";
-    } else if (/^4$/.test(msg)) {
-      s.orderType = "Dine-in";
-    } else if (/^5$|^6$/.test(msg)) {
+    if (/^2$/.test(msg)) s.orderType = "Delivery";
+    else if (/^3$/.test(msg)) s.orderType = "Takeaway";
+    else if (/^4$/.test(msg)) s.orderType = "Dine-in";
+    else if (/^[1-9]\d*$|^[A-Za-z]\d{1,2}$/i.test(msg)) {
+      s.step = "ask_item_from_menu";
+    } else if (/^[56]$/.test(msg)) {
       await sendText(
         from,
-        "This option is coming soon. For now, please choose 1–4 or 7 to restart."
+        "This option is coming soon. Please choose 1–4 or 7 to restart."
       );
       return;
-    } else if (/^[A-Za-z]\d{1,2}$/.test(msg)) {
-      // user typed code right after viewing menu
-      s.step = "ask_item_from_menu";
     } else {
       await sendText(from, "Please choose 1–7.\n\n" + showMainMenu());
       return;
@@ -212,44 +219,27 @@ async function route(from, text) {
       s.step = "ask_item";
       await sendText(
         from,
-        "Great! What would you like to order?\nYou can type an item name, or send an item **code** (e.g., B1)."
+        "Great! Reply with menu **number** (e.g., 1) or **code** (e.g., P1) to choose an item."
       );
       return;
     }
   }
 
-  // typed item code directly after menu view
-  if (s.step === "ask_item_from_menu") {
-    const item = findItemByCode(msg);
-    if (item) {
-      s.orderItem = item.name;
-      s.itemCode = item.code;
-      s.step = "ask_qty";
-      await sendText(from, `How many **${item.name}**? (e.g., 1 or 2)`);
+  if (s.step === "ask_item_from_menu" || s.step === "ask_item") {
+    const item = findItemByNumberOrCode(msg);
+    if (!item) {
+      await sendText(
+        from,
+        s.step === "ask_item_from_menu"
+          ? "Please reply with a valid menu **number** or **code**."
+          : "Please send a valid menu **number** or **code** (e.g., 1 or P1)."
+      );
       return;
     }
-    // if not a code, bounce back to menu
-    await sendText(
-      from,
-      "Please reply with a valid item code from the menu, or type 7 to restart."
-    );
-    return;
-  }
-
-  // ask item in normal flow
-  if (s.step === "ask_item") {
-    const asCode = findItemByCode(msg);
-    if (asCode) {
-      s.orderItem = asCode.name;
-      s.itemCode = asCode.code;
-    } else if (msg.length >= 2) {
-      s.orderItem = msg;
-    } else {
-      await sendText(from, "Please enter a valid item or menu code.");
-      return;
-    }
+    s.orderItem = item.name;
+    s.itemCode = item.code;
     s.step = "ask_qty";
-    await sendText(from, `How many **${s.orderItem}**? (e.g., 1 or 2)`);
+    await sendText(from, `How many **${item.name}**? (e.g., 1 or 2)`);
     return;
   }
 
@@ -267,7 +257,10 @@ async function route(from, text) {
     } else {
       s.address = "";
       s.step = "ask_payment";
-      await sendText(from, "Choose payment (dummy): **Cash** or **Card**.");
+      await sendText(
+        from,
+        "Choose payment (dummy): **Pay at Counter** or **Card**."
+      );
     }
     return;
   }
@@ -279,16 +272,19 @@ async function route(from, text) {
     }
     s.address = msg;
     s.step = "ask_payment";
-    await sendText(from, "Choose payment (dummy): **Cash** or **Card**.");
+    await sendText(
+      from,
+      "Choose payment (dummy): **Pay at Counter** or **Card**."
+    );
     return;
   }
 
   if (s.step === "ask_payment") {
-    if (!/^(cash|card)$/i.test(msg)) {
-      await sendText(from, "Please type **Cash** or **Card**.");
+    if (!/^(pay at counter|card)$/i.test(msg)) {
+      await sendText(from, "Please type **Pay at Counter** or **Card**.");
       return;
     }
-    s.paymentMethod = /^cash$/i.test(msg) ? "Cash" : "Card";
+    s.paymentMethod = /^card$/i.test(msg) ? "Card" : "Pay at Counter";
     s.step = "confirm";
     await sendText(from, orderSummary(s));
     await sendText(
@@ -302,10 +298,7 @@ async function route(from, text) {
     if (/^confirm$/i.test(msg)) {
       const ok = await saveToAirtable(s, from);
       if (ok) {
-        await sendText(
-          from,
-          "Your order was received 🎉 Thank you! We’ll update you soon."
-        );
+        await sendText(from, "Your order has been confirmed ✅");
       } else {
         await sendText(
           from,
@@ -313,7 +306,6 @@ async function route(from, text) {
         );
       }
       sessions.delete(from);
-      // send main menu again for convenience
       await sendText(from, "Anything else?\n" + showMainMenu());
       sessions.set(from, { step: "menu" });
       return;
@@ -322,11 +314,10 @@ async function route(from, text) {
     return;
   }
 
-  // fallback
   await sendText(from, "I didn’t get that. Type **7** for Help/Restart.");
 }
 
-// ---------- ROUTES ----------
+// ---------- routes ----------
 app.get("/health", (_, res) => res.status(200).send("OK"));
 
 app.get("/webhook", (req, res) => {
@@ -343,15 +334,12 @@ app.post("/webhook", async (req, res) => {
   try {
     const from = getFrom(req.body);
     const text = getIncomingText(req.body);
-    if (from && text) {
-      await route(from, text);
-    }
+    if (from && text) await route(from, text);
   } catch (e) {
-    console.error("Webhook handler error:", e?.message);
+    console.error("Webhook error:", e?.message);
   }
   res.sendStatus(200);
 });
 
-// ---------- START ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Bot running on ${PORT}`));
