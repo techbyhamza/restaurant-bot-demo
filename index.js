@@ -1,72 +1,51 @@
-// index.js
-// type: module  (package.json میں "type": "module" ہونا چاہیے)
-
+// index.js  (Node 18+, package.json has: "type": "module")
 import express from "express";
 import axios from "axios";
 
 const app = express();
 app.use(express.json());
 
-// --- ENV ---
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+// ----- Env -----
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;           // Meta permanent token
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;     // WABA phone number id
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;           // webhook verify token
 
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
 
-// --- Simple in-memory session store ---
-const sessions = new Map(); // key = phone, value = state object
+// ----- Simple in-memory sessions -----
+const sessions = {}; // key = user phone (E.164), value = state
 
-function getSession(phone) {
-  if (!sessions.has(phone)) {
-    sessions.set(phone, {
-      step: "WELCOME",
-      item: null,
-      qty: null,
-      orderType: null, // Delivery | Takeaway | Dine-in
-      address: null,
-      payment: null, // dummy only (not stored)
-    });
-  }
-  return sessions.get(phone);
-}
-
-function resetSession(phone) {
-  sessions.delete(phone);
-}
-
-// --- Menu (feel free to edit names/prices) ---
+// ----- Menu (Edit as you like) -----
 const MENU = [
-  { code: "1", name: 'Pepperoni Pizza (8")' },
-  { code: "2", name: 'Margherita Pizza (12")' },
-  { code: "3", name: "Veggie Burger" },
+  { code: "1", name: 'Margherita Pizza (12")' },
+  { code: "2", name: 'Pepperoni Pizza (8")' },
+  { code: "3", name: 'Veggie Pizza (12")' },
 ];
 
-const menuText = () => {
-  const lines = MENU.map(m => `${m.code}. ${m.name}`).join("\n");
-  return (
-`Welcome to *Crystal Eats* 👋
+const ORDER_TYPES = ["Delivery", "Takeaway", "Dine-in"];
 
-Please choose an item by number:
-${lines}
+// ----- Utils -----
+function menuText() {
+  const lines = MENU.map(i => `*${i.code}*. ${i.name}`);
+  return [
+    "🍕 *Menu*",
+    ...lines,
+    "",
+    "Reply with the *number* of the item (e.g., 1).",
+  ].join("\n");
+}
 
-Type the number (e.g., 1). 
-You can type *7* anytime to restart.`
-  );
-};
-
-// --- WhatsApp send utility ---
-async function sendText(to, text) {
+async function sendMessage(to, text) {
   const url = `https://graph.facebook.com/v23.0/${PHONE_NUMBER_ID}/messages`;
-  const payload = {
+  const body = {
     messaging_product: "whatsapp",
     to,
     type: "text",
     text: { body: text },
   };
-  await axios.post(url, payload, {
+  await axios.post(url, body, {
     headers: {
       Authorization: `Bearer ${ACCESS_TOKEN}`,
       "Content-Type": "application/json",
@@ -74,237 +53,263 @@ async function sendText(to, text) {
   });
 }
 
-// --- Airtable save (WITHOUT Payment field) ---
-async function saveToAirtable({ phone, itemName, qty, address, orderType }) {
+async function saveToAirtable(record) {
   const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
     AIRTABLE_TABLE_NAME
   )}`;
   const fields = {
-    "Phone Number": phone,
-    "Order Item": itemName,
-    "Quantity": Number(qty),
-    "Address": address || "",
+    "Phone Number": record.phone,
+    "Order Item": record.itemName,
+    "Quantity": Number(record.qty) || 1,
+    "Address": record.address || "",
     "Status": "Pending",
-    "Order Type": orderType, // Delivery | Takeaway | Dine-in
     "Order Time": new Date().toISOString(),
+    "Order Type": record.orderType, // should be one of Delivery/Takeaway/Dine-in
   };
   await axios.post(
     url,
     { records: [{ fields }] },
-    { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } }
+    {
+      headers: {
+        Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
   );
 }
 
-// --- Flow helpers ---
+function startSessionIfNeeded(from) {
+  if (!sessions[from]) {
+    sessions[from] = {
+      step: "menu", // menu -> qty -> orderType -> address? -> summary
+      item: null,
+      qty: null,
+      orderType: null,
+      address: null,
+    };
+  }
+}
+
+function showWelcome() {
+  return [
+    "👋 *Welcome!*",
+    "I can take your pizza order.",
+    "",
+    menuText(),
+    "",
+    "Type *7* anytime to restart.",
+  ].join("\n");
+}
+
 function summaryText(s) {
-  return (
-`Order Summary ✅
-
-• Type: ${s.orderType}
-• Item: ${s.item} x${s.qty}
-• Payment: ${s.payment}
-
-Type *Confirm* to place the order,
-or *7* to restart.`
-  );
+  return [
+    "🧾 *Order Summary* ✅",
+    `• Type: ${s.orderType}`,
+    `• Item: ${s.item} x${s.qty}`,
+    ...(s.orderType === "Delivery" && s.address
+      ? [`• Address: ${s.address}`]
+      : []),
+    "",
+    "Type *Confirm* to place the order, or *7* to restart.",
+  ].join("\n");
 }
 
-async function handleIncomingText(phone, text) {
-  const msg = (text || "").trim();
-  const lower = msg.toLowerCase();
-
-  // restart shortcuts
-  if (["7", "restart", "menu"].includes(lower)) {
-    resetSession(phone);
-    await sendText(phone, menuText());
-    return;
-  }
-
-  // greetings → welcome
-  if (["hi", "hello", "hey", "hy"].includes(lower)) {
-    resetSession(phone);
-    await sendText(phone, menuText());
-    return;
-  }
-
-  const s = getSession(phone);
-
-  switch (s.step) {
-    case "WELCOME": {
-      // expect a menu number
-      const found = MENU.find(m => m.code === msg);
-      if (!found) {
-        await sendText(phone, `Sorry, I didn’t get that.\n\n${menuText()}`);
-        return;
-      }
-      s.item = found.name;
-      s.step = "ASK_QTY";
-      await sendText(
-        phone,
-        `How many *${found.name}*? (e.g., 1 or 2)`
-      );
-      return;
-    }
-
-    case "ASK_QTY": {
-      const n = Number(msg);
-      if (!Number.isInteger(n) || n <= 0) {
-        await sendText(phone, `Please enter a valid quantity (e.g., 1 or 2).`);
-        return;
-      }
-      s.qty = n;
-      s.step = "ASK_ORDER_TYPE";
-      await sendText(
-        phone,
-        `Choose order type:\n• *Delivery*\n• *Takeaway*\n• *Dine-in*\n\n(Type exactly one of the options.)`
-      );
-      return;
-    }
-
-    case "ASK_ORDER_TYPE": {
-      const choice =
-        ["delivery", "takeaway", "dine-in", "dine in"].find(opt => lower === opt);
-      if (!choice) {
-        await sendText(
-          phone,
-          `Please type one option:\n*Delivery*, *Takeaway*, or *Dine-in*.`
-        );
-        return;
-      }
-      s.orderType =
-        lower === "dine in" ? "Dine-in" : lower.charAt(0).toUpperCase() + lower.slice(1);
-
-      if (s.orderType === "Delivery") {
-        s.step = "ASK_ADDRESS";
-        await sendText(
-          phone,
-          `Please share your *delivery address* (street, city).`
-        );
-      } else {
-        s.address = ""; // not required
-        s.step = "ASK_PAYMENT";
-        await sendText(
-          phone,
-          `Choose payment (dummy): *Pay at Counter* or *Card*.`
-        );
-      }
-      return;
-    }
-
-    case "ASK_ADDRESS": {
-      if (msg.length < 3) {
-        await sendText(phone, `Please enter a valid address.`);
-        return;
-      }
-      s.address = msg;
-      s.step = "ASK_PAYMENT";
-      await sendText(
-        phone,
-        `Choose payment (dummy): *Pay at Counter* or *Card*.`
-      );
-      return;
-    }
-
-    case "ASK_PAYMENT": {
-      const valid = ["pay at counter", "card"];
-      const pick = valid.find(v => lower === v);
-      if (!pick) {
-        await sendText(
-          phone,
-          `Please type one option: *Pay at Counter* or *Card*.`
-        );
-        return;
-      }
-      s.payment = pick === "card" ? "Card" : "Pay at Counter";
-      s.step = "CONFIRM";
-      await sendText(phone, summaryText(s));
-      return;
-    }
-
-    case "CONFIRM": {
-      if (lower === "confirm") {
-        try {
-          // Save without Payment field
-          await saveToAirtable({
-            phone,
-            itemName: s.item,
-            qty: s.qty,
-            address: s.address,
-            orderType: s.orderType,
-          });
-          await sendText(
-            phone,
-            `🎉 *Order placed!* Thank you.\nWe’ll start preparing your order now.\n\nType *menu* to start a new order.`
-          );
-          resetSession(phone);
-        } catch (err) {
-          console.error("Airtable save error:", err?.response?.data || err.message);
-          await sendText(
-            phone,
-            `Sorry, we couldn’t save your order right now. Please try again.`
-          );
-        }
-      } else {
-        await sendText(
-          phone,
-          `Please type *Confirm* to place the order, or *7* to restart.`
-        );
-      }
-      return;
-    }
-
-    default: {
-      resetSession(phone);
-      await sendText(phone, menuText());
-    }
-  }
-}
-
-// --- Webhook verify (GET) ---
+// ----- Webhook Verify (GET) -----
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+  try {
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+    if (mode === "subscribe" && token === VERIFY_TOKEN) {
+      return res.status(200).send(challenge);
+    }
+    return res.sendStatus(403);
+  } catch (e) {
+    return res.sendStatus(500);
   }
-  return res.sendStatus(403);
 });
 
-// --- Webhook receiver (POST) ---
+// ----- Webhook Receive (POST) -----
 app.post("/webhook", async (req, res) => {
   try {
-    const body = req.body;
+    const entry = req.body?.entry?.[0];
+    const change = entry?.changes?.[0];
+    const value = change?.value;
 
-    // WhatsApp message structure
-    const entry = body?.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const messages = value?.messages;
-
-    if (messages && messages[0]) {
-      const msg = messages[0];
-      const from = msg.from; // E.164 without +
-      const text = msg.text?.body ?? "";
-
-      // Normalize to +E.164
-      const phone = from.startsWith("+") ? from : `+${from}`;
-
-      await handleIncomingText(phone, text);
+    // Support both test and real messages
+    const msg = value?.messages?.[0];
+    const from = msg?.from; // E.164
+    if (!from) {
+      return res.sendStatus(200);
     }
 
-    res.sendStatus(200);
+    // Extract text body (also handle button/interactive if needed later)
+    let body = "";
+    if (msg.type === "text") {
+      body = msg.text.body || "";
+    } else if (msg.type === "interactive") {
+      const itype = msg.interactive?.type;
+      body =
+        itype === "button_reply"
+          ? msg.interactive.button_reply?.title || ""
+          : itype === "list_reply"
+          ? msg.interactive.list_reply?.title || ""
+          : "";
+    }
+
+    body = (body || "").trim();
+    const lc = body.toLowerCase();
+
+    // Shortcuts: restart / hello
+    if (lc === "7" || lc === "restart" || lc === "menu") {
+      sessions[from] = null;
+      startSessionIfNeeded(from);
+      await sendMessage(from, showWelcome());
+      return res.sendStatus(200);
+    }
+
+    // New or greeting
+    if (
+      !sessions[from] ||
+      ["hi", "hello", "hey", "start"].includes(lc)
+    ) {
+      startSessionIfNeeded(from);
+      sessions[from].step = "menu";
+      await sendMessage(from, showWelcome());
+      return res.sendStatus(200);
+    }
+
+    // Continue existing flow
+    const s = sessions[from];
+
+    // Step: menu (choose item by number)
+    if (s.step === "menu") {
+      const chosen = MENU.find(m => m.code === lc || m.name.toLowerCase() === lc);
+      if (!chosen) {
+        await sendMessage(
+          from,
+          "Please pick an item by number.\n\n" + menuText()
+        );
+        return res.sendStatus(200);
+      }
+      s.item = chosen.name;
+      s.step = "qty";
+      await sendMessage(
+        from,
+        `How many *${s.item}*? (e.g., 1 or 2)`
+      );
+      return res.sendStatus(200);
+    }
+
+    // Step: qty
+    if (s.step === "qty") {
+      const n = parseInt(lc, 10);
+      if (!Number.isFinite(n) || n <= 0) {
+        await sendMessage(from, "Please enter a valid number for quantity (e.g., 1 or 2).");
+        return res.sendStatus(200);
+      }
+      s.qty = n;
+      s.step = "orderType";
+      await sendMessage(
+        from,
+        [
+          "Choose *Order Type*: ",
+          "• *Delivery*",
+          "• *Takeaway*",
+          "• *Dine-in*",
+          "",
+          "Type one of the above."
+        ].join("\n")
+      );
+      return res.sendStatus(200);
+    }
+
+    // Step: orderType
+    if (s.step === "orderType") {
+      const match = ORDER_TYPES.find(t => t.toLowerCase() === lc);
+      if (!match) {
+        await sendMessage(
+          from,
+          "Please type *Delivery*, *Takeaway*, or *Dine-in*."
+        );
+        return res.sendStatus(200);
+      }
+      s.orderType = match;
+
+      if (s.orderType === "Delivery") {
+        s.step = "address";
+        await sendMessage(
+          from,
+          "Please share your *delivery address*."
+        );
+        return res.sendStatus(200);
+      } else {
+        s.step = "summary";
+        await sendMessage(from, summaryText(s));
+        return res.sendStatus(200);
+      }
+    }
+
+    // Step: address (only for Delivery)
+    if (s.step === "address") {
+      if (!body) {
+        await sendMessage(from, "Please enter a valid address for delivery.");
+        return res.sendStatus(200);
+      }
+      s.address = body;
+      s.step = "summary";
+      await sendMessage(from, summaryText(s));
+      return res.sendStatus(200);
+    }
+
+    // Step: summary -> confirm
+    if (s.step === "summary") {
+      if (lc === "confirm") {
+        try {
+          await saveToAirtable({
+            phone: `+${from}`, // WhatsApp gives number without leading +
+            itemName: s.item,
+            qty: s.qty,
+            orderType: s.orderType,
+            address: s.address || "",
+          });
+          sessions[from] = null;
+          await sendMessage(
+            from,
+            "🎉 *Your order has been placed successfully!* \nThank you! Type *menu* to order again."
+          );
+        } catch (err) {
+          console.error("Airtable save error:", err?.response?.data || err.message);
+          await sendMessage(
+            from,
+            "⚠️ Sorry, we couldn't save your order right now. Please try again."
+          );
+        }
+        return res.sendStatus(200);
+      } else {
+        await sendMessage(
+          from,
+          "Please type *Confirm* to place the order, or *7* to restart."
+        );
+        return res.sendStatus(200);
+      }
+    }
+
+    // Fallback
+    await sendMessage(from, "Type *menu* to see options or *7* to restart.");
+    return res.sendStatus(200);
   } catch (e) {
-    console.error("Webhook error:", e);
-    res.sendStatus(200); // Always 200 to avoid retries storm
+    console.error("Webhook error:", e?.response?.data || e.message);
+    return res.sendStatus(200);
   }
 });
 
-// --- Health ---
-app.get("/health", (_req, res) => res.status(200).send("OK"));
+// ----- Health -----
+app.get("/health", (req, res) => res.status(200).send("ok"));
 
+// ----- Start -----
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log("Server listening on", PORT);
 });
