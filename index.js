@@ -1,99 +1,99 @@
-// index.js
-import express from 'express';
-import bodyParser from 'body-parser';
+// index.js  (ESM)
+// --- Env vars needed on Railway ---
+// VERIFY_TOKEN      -> وہی جو آپ نے Meta Webhooks میں ڈالا ہے
+// ACCESS_TOKEN      -> WhatsApp temporary/permanent access token
+// PHONE_NUMBER_ID   -> WhatsApp "Phone number ID" (not the phone itself)
+
+import express from "express";
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+app.use(express.json());
 
-// Env vars (Railway Settings → Variables میں سیٹ کریں)
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;   // مثال: hamza-verify-123
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;   // WhatsApp Cloud API User Access Token
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID; // WhatsApp Business Phone Number ID
+// Optional: basic health check
+app.get("/", (req, res) => res.send("OK"));
+app.get("/health", (req, res) => res.send("healthy"));
 
-app.use(bodyParser.json());
+// ✅ Webhook verification (Meta calls this once when you press “Verify and save”)
+app.get("/webhook", (req, res) => {
+  const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// Health check route
-app.get('/', (req, res) => {
-  res.status(200).send('Server is running ✅');
-});
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
-/**
- * Webhook Verification (GET)
- * یہ Meta Developers کے Webhook Verify کیلئے ہے
- */
-app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('Webhook verified ✅');
+  if (mode && token && mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verified");
     return res.status(200).send(challenge);
-  } else {
-    return res.sendStatus(403);
   }
+  return res.sendStatus(403);
 });
 
-/**
- * Webhook Receive (POST)
- * WhatsApp سے آنے والے messages یہاں آئیں گے
- */
-app.post('/webhook', async (req, res) => {
+// ✅ Incoming events/messages land here
+app.post("/webhook", async (req, res) => {
+  const body = req.body;
+  console.log("🔔 Incoming webhook:", JSON.stringify(body, null, 2));
+
+  // Always 200 quickly so Meta doesn’t retry
+  res.sendStatus(200);
+
   try {
-    const body = req.body;
+    const change = body?.entry?.[0]?.changes?.[0];
+    const value = change?.value;
+    const messages = value?.messages;
 
-    if (body.object === 'whatsapp_business_account') {
-      body.entry?.forEach(entry => {
-        entry.changes?.forEach(change => {
-          const value = change.value || {};
-          const messages = value.messages || [];
+    // If a user message arrived
+    if (Array.isArray(messages) && messages.length > 0) {
+      const msg = messages[0];
+      const from = msg.from; // WhatsApp number (international, no +)
+      const text = msg.text?.body || "";
 
-          messages.forEach(msg => {
-            const from = msg.from;         // User کا نمبر
-            const text = msg.text?.body;   // Message body
+      console.log("📩 From:", from, "Text:", text);
 
-            if (text) {
-              console.log(`📩 Message from ${from}: ${text}`);
-              sendWhatsAppText(from, `آپ نے لکھا: "${text}" ✅`);
-            }
-          });
-        });
-      });
+      // Simple echo / greeting reply (you can plug your menu/flow here)
+      const reply =
+        text.trim().toLowerCase() === "hi" || text.trim().toLowerCase() === "hello"
+          ? "Welcome 👋 Your WhatsApp API is connected!\nSend 'menu' to get options."
+          : text.trim().toLowerCase() === "menu"
+          ? "1) Burgers 🍔\n2) Pizza 🍕\n3) Drinks 🥤\nReply with a number."
+          : "Got it! Reply 'menu' to see options.";
+
+      await sendWhatsAppText(from, reply);
     }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('❌ Webhook error:', err);
-    res.sendStatus(500);
+  } catch (e) {
+    console.error("❌ Handler error:", e);
   }
 });
 
-/**
- * Helper function: WhatsApp API کے ذریعے رپلائی بھیجنا
- */
-async function sendWhatsAppText(to, text) {
-  const resp = await fetch(`https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`, {
-    method: 'POST',
+// --- Helper: send a WhatsApp text using Cloud API ---
+async function sendWhatsAppText(to, bodyText) {
+  const token = process.env.ACCESS_TOKEN;
+  const phoneNumberId = process.env.PHONE_NUMBER_ID;
+
+  const url = `https://graph.facebook.com/v23.0/${phoneNumberId}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: bodyText },
+  };
+
+  const resp = await fetch(url, {
+    method: "POST",
     headers: {
-      'Authorization': `Bearer ${ACCESS_TOKEN}`,
-      'Content-Type': 'application/json'
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body: text }
-    })
+    body: JSON.stringify(payload),
   });
 
   if (!resp.ok) {
-    const error = await resp.text();
-    console.error('❌ Send error:', resp.status, error);
+    const errText = await resp.text();
+    console.error("❌ Send error:", resp.status, errText);
   } else {
-    console.log('✅ Reply sent successfully');
+    const data = await resp.json();
+    console.log("✅ Sent:", JSON.stringify(data));
   }
 }
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
