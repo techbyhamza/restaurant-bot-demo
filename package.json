@@ -1,16 +1,13 @@
 {
-  "name": "whatsapp-restaurant-bot-demo-plus-hamza",
+  "name": "wa-restaurant-bot",
   "version": "1.0.0",
-  "description": "WhatsApp restaurant bot demo tailored: Delivery + Dine-in, cash/online/arrival payments, optional Sheets logging.",
+  "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.7.2",
-    "body-parser": "^1.20.2",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "twilio": "^4.15.3"
+    "express": "^4.19.2"
   }
 }
