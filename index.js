@@ -1,228 +1,198 @@
-// index.js  — WhatsApp Cloud + Express (ESM)
-// Requires: express, axios
-// ENV VARS needed on Railway: ACCESS_TOKEN, PHONE_NUMBER_ID, VERIFY_TOKEN
-
 import express from "express";
 import axios from "axios";
 
+// ====== ENV ======
+const {
+  PORT = 8080,
+  VERIFY_TOKEN,            // e.g. "my-secret-123"
+  ACCESS_TOKEN,            // System user token (never expose)
+  PHONE_NUMBER_ID,         // e.g. "740436365822100"
+  AIRTABLE_API_KEY,        // from https://airtable.com
+  AIRTABLE_BASE_ID,        // Base ID, e.g. "appXXXXXXXXXXXXXX"
+  AIRTABLE_TABLE_NAME = "Orders" // table name exactly as Airtable میں نظر آتا ہے
+} = process.env;
+
+// ====== APP ======
 const app = express();
 app.use(express.json());
 
-// ====== Config from ENV ======
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;   // e.g. "740436365822100"
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "my-secret-123";
-
-// ====== Simple in‑memory session (per number) ======
+// سادہ in-memory session (demo کیلئے کافی ہے)
 const sessions = new Map();
-/*
-  session shape:
-  {
-    step: "idle" | "menu" | "ordering_name" | "ordering_item" | "ordering_qty" | "confirm",
-    order: { name?, item?, qty? }
-  }
-*/
+
+// Menu mapping (اپنے مطابق بدل لیں)
+const MENU = {
+  "1": "Pizza",
+  "2": "Burger",
+  "3": "Pasta",
+  "4": "Salad"
+};
 
 // ====== Helpers ======
-const WHATSAPP_API_URL = `https://graph.facebook.com/v23.0/${PHONE_NUMBER_ID}/messages`;
 
+// WhatsApp پر text بھیجنا
 async function sendText(to, body) {
-  const payload = {
-    messaging_product: "whatsapp",
-    to,
-    type: "text",
-    text: { body }
+  const url = `https://graph.facebook.com/v23.0/${PHONE_NUMBER_ID}/messages`;
+  await axios.post(
+    url,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
+// Airtable میں ریکارڈ بنانا
+async function createAirtableOrder({ phone, item, quantity, address }) {
+  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
+    AIRTABLE_TABLE_NAME
+  )}`;
+
+  const fields = {
+    "Phone Number": phone,
+    "Order Item": item,
+    "Quantity": Number(quantity),
+    "Address": address,
+    "Status": "Pending",
+    "Order Time": new Date().toISOString()
   };
-  await axios.post(WHATSAPP_API_URL, payload, {
-    headers: {
-      Authorization: `Bearer ${ACCESS_TOKEN}`,
-      "Content-Type": "application/json"
-    }
-  });
+
+  await axios.post(
+    url,
+    { records: [{ fields }] },
+    { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}`, "Content-Type": "application/json" } }
+  );
 }
 
-function getSession(phone) {
-  if (!sessions.has(phone)) {
-    sessions.set(phone, { step: "idle", order: {} });
-  }
-  return sessions.get(phone);
-}
+// نمبر نارملائز (E.164 style رکھیں)
+const normalizePhone = (waId) => (waId?.startsWith("+") ? waId : `+${waId}`);
 
-function resetSession(phone) {
-  sessions.set(phone, { step: "idle", order: {} });
-}
+// ====== Routes ======
 
-// ====== Menu text ======
-const MENU_TEXT =
-  "🍽️ *Welcome to Demo Restaurant!*\n" +
-  "Reply with a number:\n" +
-  "1️⃣  View Menu\n" +
-  "2️⃣  Place an Order\n" +
-  "3️⃣  Help / Talk to human\n\n" +
-  "You can type *menu* anytime.";
+// Health (optional)
+app.get("/", (_, res) => res.send("OK"));
+app.get("/health", (_, res) => res.json({ ok: true }));
 
-const FOOD_MENU =
-  "📋 *Today’s Menu*\n" +
-  "• Margherita Pizza — $12\n" +
-  "• Pepperoni Pizza — $14\n" +
-  "• Veggie Burger — $10\n" +
-  "• Fries — $4\n\n" +
-  "Type *2* to start an order.";
-
-// ====== Webhook: Verify (GET) ======
+// Webhook Verify (Meta)
 app.get("/webhook", (req, res) => {
-  try {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      return res.status(200).send(challenge);
-    }
-    return res.sendStatus(403);
-  } catch {
-    return res.sendStatus(500);
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
   }
+  return res.sendStatus(403);
 });
 
-// ====== Webhook: Receive (POST) ======
+// Webhook Receive (Meta)
 app.post("/webhook", async (req, res) => {
-  // Must 200 quickly to Meta
-  res.sendStatus(200);
-
   try {
-    const entry = req.body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const messages = change?.value?.messages;
-    if (!messages || !messages.length) return;
+    const data = req.body;
 
-    for (const msg of messages) {
-      // Only text for now
-      const from = msg.from; // E.164 string
-      const type = msg.type;
+    // Basic validation
+    const entry = data?.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const messages = changes?.value?.messages;
+    if (!messages || !messages.length) return res.sendStatus(200);
 
-      // Ignore non-user messages (e.g., statuses)
-      if (!from) continue;
+    const msg = messages[0];
+    if (msg.type !== "text") return res.sendStatus(200);
 
-      // Handle text
-      if (type === "text") {
-        const text = (msg.text?.body || "").trim();
-        await handleText(from, text);
-      } else {
-        await sendText(from, "📎 Please send text messages for now. Type *menu* to begin.");
+    const fromRaw = msg.from;               // e.g. "61426095847"
+    const from = normalizePhone(fromRaw);   // "+61426095847"
+    const text = (msg.text?.body || "").trim();
+
+    // سیشن لوڈ / بنائیں
+    let s = sessions.get(from);
+    if (!s) {
+      s = { step: "item" }; // item -> quantity -> address -> done
+      sessions.set(from, s);
+      await sendText(from,
+        "👋 خوش آمدید! مہربانی کر کے menu سے آئٹم چنیں:\n1) Pizza\n2) Burger\n3) Pasta\n4) Salad\n\nنمبرا ٹائپ کریں (مثلاً 1)");
+      return res.sendStatus(200);
+    }
+
+    // اسٹیٹ مشین
+    if (s.step === "item") {
+      const item = MENU[text];
+      if (!item) {
+        await sendText(from, "براہِ کرم درست آپشن بھیجیں (1-4).");
+        return res.sendStatus(200);
       }
-    }
-  } catch (e) {
-    // Optional: log error
-    // console.error("Webhook error:", e?.response?.data || e.message);
-  }
-});
-
-async function handleText(from, text) {
-  const session = getSession(from);
-  const t = text.toLowerCase();
-
-  // Global shortcuts
-  if (["menu", "start", "hi", "hello", "hey"].some(k => t === k)) {
-    session.step = "menu";
-    await sendText(from, MENU_TEXT);
-    return;
-  }
-  if (t === "cancel") {
-    resetSession(from);
-    await sendText(from, "❌ Order cancelled. Type *menu* to start again.");
-    return;
-  }
-
-  // Flow:
-  switch (session.step) {
-    case "idle": {
-      // First contact
-      session.step = "menu";
-      await sendText(from, MENU_TEXT);
-      break;
+      s.item = item;
+      s.step = "quantity";
+      await sendText(from, `آپ نے *${item}* منتخب کیا ✅\nQuantity بتائیں (مثلاً 1 یا 2)`);
+      return res.sendStatus(200);
     }
 
-    case "menu": {
-      if (t === "1" || t.includes("view")) {
-        await sendText(from, FOOD_MENU);
-      } else if (t === "2" || t.includes("order")) {
-        session.step = "ordering_name";
-        session.order = {};
-        await sendText(from, "👤 Great! What’s your *name*?");
-      } else if (t === "3" || t.includes("help")) {
-        await sendText(from, "👩‍💼 A human agent will contact you shortly. Type *menu* to go back.");
-      } else {
-        await sendText(from, "🤔 I didn’t get that.\n" + MENU_TEXT);
-      }
-      break;
-    }
-
-    case "ordering_name": {
-      session.order.name = text;
-      session.step = "ordering_item";
-      await sendText(
-        from,
-        "🍽️ Thanks, *" +
-          session.order.name +
-          "*.\nWhat would you like to order?\n(e.g., *Margherita Pizza*, *Veggie Burger*, *Fries*)"
-      );
-      break;
-    }
-
-    case "ordering_item": {
-      session.order.item = text;
-      session.step = "ordering_qty";
-      await sendText(from, `How many *${session.order.item}*? (enter a number)`);
-      break;
-    }
-
-    case "ordering_qty": {
+    if (s.step === "quantity") {
       const qty = parseInt(text, 10);
-      if (!Number.isFinite(qty) || qty <= 0) {
-        await sendText(from, "Please enter a valid number for quantity.");
-        return;
+      if (!(qty > 0 && qty < 100)) {
+        await sendText(from, "براہِ کرم درست quantity بھیجیں (مثلاً 1)");
+        return res.sendStatus(200);
       }
-      session.order.qty = qty;
-      session.step = "confirm";
-      await sendText(
-        from,
-        "✅ Please confirm your order:\n" +
-          `• Name: *${session.order.name}*\n` +
-          `• Item: *${session.order.item}*\n` +
-          `• Qty: *${session.order.qty}*\n\n` +
-          "Reply *yes* to confirm or *cancel* to discard."
-      );
-      break;
+      s.quantity = qty;
+      s.step = "address";
+      await sendText(from, "شکریہ! اب delivery address بھیج دیں۔");
+      return res.sendStatus(200);
     }
 
-    case "confirm": {
-      if (t === "yes" || t === "y") {
-        // Here you can save to Airtable/Sheets
+    if (s.step === "address") {
+      if (text.length < 4) {
+        await sendText(from, "براہِ کرم مکمل address لکھیں۔");
+        return res.sendStatus(200);
+      }
+      s.address = text;
+      s.step = "confirm";
+
+      await sendText(
+        from,
+        `✅ آرڈر خلاصہ:\n• Item: ${s.item}\n• Qty: ${s.quantity}\n• Address: ${s.address}\n\nConfirm کرنے کیلئے "yes" لکھیں یا "no" سے دوبارہ شروع کریں۔`
+      );
+      return res.sendStatus(200);
+    }
+
+    if (s.step === "confirm") {
+      if (/^y(es)?$/i.test(text)) {
+        // Airtable میں save
+        await createAirtableOrder({
+          phone: from,
+          item: s.item,
+          quantity: s.quantity,
+          address: s.address
+        });
+
         await sendText(
           from,
-          "🎉 Your order has been placed! We’ll get started right away.\nType *menu* for anything else."
+          "🎉 آپ کا آرڈر موصول ہو گیا ہے اور *Pending* میں درج کر دیا گیا ہے۔ شکریہ!"
         );
-        resetSession(from);
+
+        sessions.delete(from); // flow ختم
       } else {
-        await sendText(from, "Okay. Type *menu* to start again or *cancel* to exit.");
+        await sendText(from, "آرڈر منسوخ ہوگیا۔ نیا آرڈر شروع کرنے کیلئے کوئی بھی میسج کریں۔");
+        sessions.delete(from);
       }
-      break;
+      return res.sendStatus(200);
     }
 
-    default: {
-      session.step = "idle";
-      await sendText(from, "Type *menu* to start.");
-    }
+    // fallback
+    await sendText(from, "براہِ کرم ہدایات کے مطابق جواب دیں۔");
+    return res.sendStatus(200);
+  } catch (e) {
+    console.error("Webhook error", e?.response?.data || e.message);
+    return res.sendStatus(200);
   }
-}
+});
 
-// Health check
-app.get("/", (_req, res) => res.send("OK"));
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// Start server
-const PORT = process.env.PORT || 8080;
+// ====== Start ======
 app.listen(PORT, () => {
-  console.log(`Server listening on ${PORT}`);
+  console.log(`Server running on :${PORT}`);
 });
