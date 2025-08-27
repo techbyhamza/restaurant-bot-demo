@@ -1,4 +1,4 @@
-// WhatsApp Restaurant Bot (Express + Cloud API) — Multi-restaurant + Categories
+// WhatsApp Restaurant Bot (Express + Cloud API) — Multi-restaurant + Categories + OrderType
 // CommonJS (no "type":"module"), ready for Railway
 
 const express = require("express");
@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 8080;
 
 /* =============================== DATA =============================== */
 
-// DB field names (your Airtable/DB structure)
+// DB field names (Airtable/DB structure)
 const DB_FIELDS = {
   CustomerName: "CustomerName",
   PhoneNumber: "PhoneNumber",
@@ -32,7 +32,6 @@ const RESTAURANTS = {
   mandi: {
     title: "Mat'am Al Mandi",
     currency: "AUD",
-    // simple 1–3 codes as requested
     items: [
       { code: 1, name: "Lamb Mandi", price: 20, emoji: "🍖" },
       { code: 2, name: "Chicken Mandi", price: 16, emoji: "🍗" },
@@ -43,7 +42,6 @@ const RESTAURANTS = {
   fuadijan: {
     title: "Fuadijan – Pakistani Street Food",
     currency: "AUD",
-    // category → items (each item gets a 1–9 code inside its category page)
     categories: [
       {
         id: "drinks",
@@ -148,14 +146,34 @@ const RESTAURANTS = {
 const RESTAURANT_ORDER = ["mandi", "fuadijan"];
 
 /* ============================ SESSIONS ============================ */
-// wa_id -> { step, restaurantKey, categoryIdx, itemIdx, qty, customerName, address, orderType }
+// wa_id -> { step, restaurantKey, categoryIdx, itemIdx, qty, orderType, customerName, address }
 const SESS = new Map();
 function getS(wa) {
-  if (!SESS.has(wa)) SESS.set(wa, { step: "rest", restaurantKey: null, categoryIdx: null, itemIdx: null, qty: null });
+  if (!SESS.has(wa)) {
+    SESS.set(wa, {
+      step: "rest",
+      restaurantKey: null,
+      categoryIdx: null,
+      itemIdx: null,
+      qty: null,
+      orderType: null,
+      customerName: "",
+      address: "",
+    });
+  }
   return SESS.get(wa);
 }
 function resetS(wa) {
-  SESS.set(wa, { step: "rest", restaurantKey: null, categoryIdx: null, itemIdx: null, qty: null });
+  SESS.set(wa, {
+    step: "rest",
+    restaurantKey: null,
+    categoryIdx: null,
+    itemIdx: null,
+    qty: null,
+    orderType: null,
+    customerName: "",
+    address: "",
+  });
 }
 
 /* ============================== UI =============================== */
@@ -165,7 +183,6 @@ const curf = (n, c = "AUD") => {
 };
 
 function restaurantSelectionText() {
-  // Numbers in the same visible style used everywhere (1️⃣/2️⃣)
   let t = "🍴 Welcome! Please choose a restaurant:\n\n";
   RESTAURANT_ORDER.forEach((key, idx) => {
     const r = RESTAURANTS[key];
@@ -204,6 +221,16 @@ function fuadijanItemsText(catIdx) {
   });
   t += `\n👉 Reply with item number\n↩️ Type 0 to go Back`;
   return t;
+}
+
+function orderTypeText() {
+  return (
+    "🚚 Choose order type:\n\n" +
+    "1️⃣ Delivery\n" +
+    "2️⃣ Take-away\n" +
+    "3️⃣ Dine-in\n\n" +
+    "👉 Reply with 1, 2, or 3"
+  );
 }
 
 /* ========================== WhatsApp send ========================= */
@@ -266,7 +293,6 @@ async function handleIncoming(wa, text) {
     return sendText(wa, mandiMenuText());
   }
   if (text.toLowerCase() === "menu" && s.restaurantKey === "fuadijan" && s.step !== "fu_items") {
-    // show categories again
     s.step = "fu_cat";
     return sendText(wa, fuadijanCategoryText());
   }
@@ -274,7 +300,7 @@ async function handleIncoming(wa, text) {
   /* Step: choose restaurant */
   if (s.step === "rest") {
     if (/^\d$/.test(text)) {
-      const n = parseInt(text, 10); // 1 or 2
+      const n = parseInt(text, 10);
       if (n >= 1 && n <= RESTAURANT_ORDER.length) {
         const key = RESTAURANT_ORDER[n - 1];
         s.restaurantKey = key;
@@ -290,7 +316,7 @@ async function handleIncoming(wa, text) {
     return sendText(wa, restaurantSelectionText());
   }
 
-  /* Mat'am Al Mandi flow (items -> qty -> confirm) */
+  /* Mat'am Al Mandi: items -> order type -> qty -> confirm */
   if (s.restaurantKey === "mandi") {
     if (s.step === "mandi_items") {
       const n = parseInt(text, 10);
@@ -298,12 +324,12 @@ async function handleIncoming(wa, text) {
       const item = list.find(it => it.code === n);
       if (!item) return sendText(wa, "Please send a valid item number (1–3) or type menu.");
       s.itemIdx = list.indexOf(item);
-      s.step = "qty";
-      return sendText(wa, `✅ You selected: ${item.emoji} ${item.name}\nPrice: ${curf(item.price, RESTAURANTS.mandi.currency)}\n\nPlease send *quantity* (1–99).`);
+      s.step = "otype";               // NEW
+      return sendText(wa, orderTypeText());
     }
   }
 
-  /* Fuadijan flow (category -> items -> qty -> confirm) */
+  /* Fuadijan: category -> items -> order type -> qty -> confirm */
   if (s.restaurantKey === "fuadijan") {
     if (s.step === "fu_cat") {
       if (/^\d$/.test(text)) {
@@ -329,12 +355,20 @@ async function handleIncoming(wa, text) {
       const item = cat.items.find(it => it.code === n);
       if (!item) return sendText(wa, "Please send a valid item number or 0 to go back.");
       s.itemIdx = cat.items.indexOf(item);
-      s.step = "qty";
-      return sendText(
-        wa,
-        `✅ You selected: ${item.emoji} ${item.name}\nPrice: ${curf(item.price, RESTAURANTS.fuadijan.currency)}\n\nPlease send *quantity* (1–99).`
-      );
+      s.step = "otype";               // NEW
+      return sendText(wa, orderTypeText());
     }
+  }
+
+  /* Step: order type (Delivery / Take-away / Dine-in) */
+  if (s.step === "otype" && s.itemIdx != null) {
+    if (/^[123]$/.test(text)) {
+      const map = { 1: "Delivery", 2: "Take-away", 3: "Dine-in" };
+      s.orderType = map[parseInt(text, 10)];
+      s.step = "qty";
+      return sendText(wa, "Please send *quantity* (1–99).");
+    }
+    return sendText(wa, orderTypeText());
   }
 
   /* Step: quantity */
@@ -348,7 +382,13 @@ async function handleIncoming(wa, text) {
         const total = (item.price * q).toFixed(2);
         return sendText(
           wa,
-          `🧾 Order Summary\nRestaurant: ${r.title}${catLabel ? `\nCategory: ${catLabel}` : ""}\nItem: ${item.emoji} ${item.name}\nQty: ${q}\nTotal: ${curf(total, r.currency)}\n\n✅ Confirm → type *yes*\n❌ Cancel → type *no*`
+          `🧾 Order Summary\n` +
+            `Restaurant: ${r.title}${catLabel ? `\nCategory: ${catLabel}` : ""}\n` +
+            `Item: ${item.emoji} ${item.name}\n` +
+            `Order Type: ${s.orderType}\n` +
+            `Qty: ${q}\n` +
+            `Total: ${curf(total, r.currency)}\n\n` +
+            `✅ Confirm → type *yes*\n❌ Cancel → type *no*`
         );
       }
     }
@@ -364,19 +404,21 @@ async function handleIncoming(wa, text) {
 
       // TODO: Save to Airtable/DB using field names below
       const record = {
-        [DB_FIELDS.CustomerName]: "", // optional to capture later
+        [DB_FIELDS.CustomerName]: s.customerName || "",
         [DB_FIELDS.PhoneNumber]: wa,
         [DB_FIELDS.MenuItem]: `${r.title} - ${item.name}`,
         [DB_FIELDS.Quantity]: s.qty,
-        [DB_FIELDS.Address]: "",
-        [DB_FIELDS.OrderType]: "", // pickup/delivery (add later)
+        [DB_FIELDS.Address]: s.address || "",
+        [DB_FIELDS.OrderType]: s.orderType || "",
         [DB_FIELDS.OrderTime]: new Date().toISOString(),
       };
       // console.log("Would save:", record);
 
       await sendText(
         wa,
-        `🎉 Order confirmed!\n${item.emoji} ${item.name} x ${s.qty}\nTotal: ${curf(total, r.currency)}\n\nType *menu* to order again or *restart* to switch restaurant.`
+        `🎉 Order confirmed!\n${item.emoji} ${item.name} x ${s.qty}\n` +
+          `Order Type: ${s.orderType}\nTotal: ${curf(total, r.currency)}\n\n` +
+          `Type *menu* to order again or *restart* to switch restaurant.`
       );
       return resetS(wa);
     }
