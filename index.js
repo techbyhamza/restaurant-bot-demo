@@ -1,4 +1,4 @@
-// WhatsApp Restaurant Bot — Multi-restaurant + Categories + Cart + OrderType details
+// WhatsApp Restaurant Bot — Two restaurants, both Category-based + Cart + Checkout details
 // CommonJS (no "type":"module"), ready for Railway
 
 const express = require("express");
@@ -28,16 +28,76 @@ const DB_FIELDS = {
 };
 
 const RESTAURANTS = {
+  // ────────────────────────── Mat'am Al Mandi ──────────────────────────
   mandi: {
     title: "Mat'am Al Mandi",
     currency: "AUD",
-    items: [
-      { code: 1, name: "Lamb Mandi", price: 20, emoji: "🍖" },
-      { code: 2, name: "Chicken Mandi", price: 16, emoji: "🍗" },
-      { code: 3, name: "Family Platter", price: 55, emoji: "🍽️" },
+    categories: [
+      {
+        id: "mandi_single",
+        label: "Mandi – Single",
+        emoji: "🍖",
+        items: [
+          { code: 1, name: "Lamb Mandi (Single)",     price: 20,  emoji: "🍖" },
+          { code: 2, name: "Chicken Mandi (Single)",  price: 20,  emoji: "🍗" },
+          { code: 3, name: "Chicken 65 Mandi (Single)", price: 22, emoji: "🍗" },
+          { code: 4, name: "Chicken Tikka Mandi (Single)", price: 22, emoji: "🍗" },
+          { code: 5, name: "Fish Mandi (Single)",     price: 22,  emoji: "🐟" },
+        ],
+      },
+      {
+        id: "mandi_meal",
+        label: "Mandi – Meal",
+        emoji: "🍽️",
+        items: [
+          { code: 1, name: "Lamb Mandi (Meal)",       price: 30, emoji: "🍖" },
+          { code: 2, name: "Chicken Mandi (Meal)",    price: 30, emoji: "🍗" },
+          { code: 3, name: "Chicken 65 Mandi (Meal)", price: 30, emoji: "🍗" },
+          { code: 4, name: "Chicken Tikka Mandi (Meal)", price: 30, emoji: "🍗" },
+          { code: 5, name: "Fish Mandi (Meal)",       price: 30, emoji: "🐟" },
+        ],
+      },
+      {
+        id: "curries",
+        label: "Curries",
+        emoji: "🍲",
+        items: [
+          { code: 1, name: "Mughlai Mutton",     price: 20, emoji: "🍖" },
+          { code: 2, name: "Dum ka Chicken",     price: 20, emoji: "🍗" },
+          { code: 3, name: "Lamb Marag Soup",    price: 20, emoji: "🥣" },
+          { code: 4, name: "Chicken Kadai",      price: 20, emoji: "🍗" },
+          { code: 5, name: "Mutton Masala",      price: 20, emoji: "🍖" },
+          { code: 6, name: "Butter Chicken",     price: 20, emoji: "🧈" },
+        ],
+      },
+      {
+        id: "breads",
+        label: "Bread (Naan)",
+        emoji: "🫓",
+        items: [
+          { code: 1, name: "Plain Naan",        price: 2.5, emoji: "🫓" },
+          { code: 2, name: "Butter Naan",       price: 3.0, emoji: "🧈" },
+          { code: 3, name: "Cheese Naan",       price: 4.0, emoji: "🧀" },
+          { code: 4, name: "Garlic Naan",       price: 4.0, emoji: "🧄" },
+          { code: 5, name: "Cheese Garlic Naan",price: 4.5, emoji: "🧀" },
+        ],
+      },
+      {
+        id: "desserts",
+        label: "Desserts",
+        emoji: "🍮",
+        items: [
+          { code: 1, name: "Fruit Custard",     price: 8.0, emoji: "🍮" },
+          { code: 2, name: "Gulab Jamun",       price: 8.0, emoji: "🍮" },
+          { code: 3, name: "Sitafal Cream",     price: 8.0, emoji: "🍨" },
+          { code: 4, name: "Mango Malai",       price: 8.0, emoji: "🥭" },
+          { code: 5, name: "Double ka Mitha",   price: 8.0, emoji: "🍰" },
+        ],
+      },
     ],
   },
 
+  // ───────────────────────────── Fuadijan ─────────────────────────────
   fuadijan: {
     title: "Fuadijan – Pakistani Street Food",
     currency: "AUD",
@@ -48,10 +108,10 @@ const RESTAURANTS = {
         emoji: "🥤",
         items: [
           { code: 1, name: "Bert’s Soft Drinks (Bottle)", price: 3.5, emoji: "🥤" },
-          { code: 2, name: "Juices (Eastcoast)", price: 5.0, emoji: "🧃" },
-          { code: 3, name: "Milk Shake (Mango)", price: 9.0, emoji: "🥤" },
-          { code: 4, name: "Bert’s 1.25 Ltr Bottle", price: 6.0, emoji: "🧪" },
-          { code: 5, name: "Spring Water / Pakola", price: 3.0, emoji: "💧" },
+          { code: 2, name: "Juices (Eastcoast)",          price: 5.0, emoji: "🧃" },
+          { code: 3, name: "Milk Shake (Mango)",          price: 9.0, emoji: "🥤" },
+          { code: 4, name: "Bert’s 1.25 Ltr Bottle",      price: 6.0, emoji: "🧪" },
+          { code: 5, name: "Spring Water / Pakola",       price: 3.0, emoji: "💧" },
         ],
       },
       {
@@ -59,12 +119,12 @@ const RESTAURANTS = {
         label: "Breakfast",
         emoji: "🍳",
         items: [
-          { code: 1, name: "Halwa Poori (2)", price: 14.99, emoji: "🥘" },
-          { code: 2, name: "Anda Paratha (2 + Omelette)", price: 11.99, emoji: "🍳" },
-          { code: 3, name: "Anda Bun", price: 8.99, emoji: "🥯" },
-          { code: 4, name: "Beef Nihari (Bowl)", price: 14.99, emoji: "🍲" },
-          { code: 5, name: "Karak Chai", price: 4.0, emoji: "☕" },
-          { code: 6, name: "Doodh Patti (add-on)", price: 2.5, emoji: "🥛" },
+          { code: 1, name: "Halwa Poori (2)",              price: 14.99, emoji: "🥘" },
+          { code: 2, name: "Anda Paratha (2 + Omelette)",  price: 11.99, emoji: "🍳" },
+          { code: 3, name: "Anda Bun",                     price: 8.99,  emoji: "🥯" },
+          { code: 4, name: "Beef Nihari (Bowl)",           price: 14.99, emoji: "🍲" },
+          { code: 5, name: "Karak Chai",                   price: 4.0,   emoji: "☕" },
+          { code: 6, name: "Doodh Patti (add-on)",         price: 2.5,   emoji: "🥛" },
         ],
       },
       {
@@ -72,9 +132,9 @@ const RESTAURANTS = {
         label: "Karahi & Nihari",
         emoji: "🍲",
         items: [
-          { code: 1, name: "Chicken Karahi (Half)", price: 24.0, emoji: "🍗" },
-          { code: 2, name: "Salt & Pepper Lamb Karahi (500g)", price: 30.0, emoji: "🍖" },
-          { code: 3, name: "Beef Nihari Plate", price: 15.0, emoji: "🥘" },
+          { code: 1, name: "Chicken Karahi (Half)",           price: 24.0, emoji: "🍗" },
+          { code: 2, name: "Salt & Pepper Lamb Karahi (500g)",price: 30.0, emoji: "🍖" },
+          { code: 3, name: "Beef Nihari Plate",               price: 15.0, emoji: "🥘" },
         ],
       },
       {
@@ -82,12 +142,12 @@ const RESTAURANTS = {
         label: "Burgers & Wraps",
         emoji: "🍔",
         items: [
-          { code: 1, name: "Beef Burger", price: 14.0, emoji: "🍔" },
-          { code: 2, name: "Chicken Shami Burger", price: 11.0, emoji: "🍔" },
-          { code: 3, name: "Chicken Tikka Burger", price: 13.0, emoji: "🍔" },
-          { code: 4, name: "Wrap (Chicken Tikka/Beef Seekh)", price: 13.0, emoji: "🌯" },
-          { code: 5, name: "Veggie Wrap", price: 13.0, emoji: "🌯" },
-          { code: 6, name: "Dahi Papri Chana Chaat", price: 9.5, emoji: "🥗" },
+          { code: 1, name: "Beef Burger",                              price: 14.0, emoji: "🍔" },
+          { code: 2, name: "Chicken Shami Burger",                     price: 11.0, emoji: "🍔" },
+          { code: 3, name: "Chicken Tikka Burger",                     price: 13.0, emoji: "🍔" },
+          { code: 4, name: "Wrap (Chicken Tikka/Beef Seekh)",          price: 13.0, emoji: "🌯" },
+          { code: 5, name: "Veggie Wrap",                              price: 13.0, emoji: "🌯" },
+          { code: 6, name: "Dahi Papri Chana Chaat",                   price: 9.5,  emoji: "🥗" },
         ],
       },
       {
@@ -95,8 +155,8 @@ const RESTAURANTS = {
         label: "Snack Packs & Chips",
         emoji: "🍟",
         items: [
-          { code: 1, name: "Chips (Small)", price: 5.0, emoji: "🍟" },
-          { code: 2, name: "Chips (Large)", price: 10.0, emoji: "🍟" },
+          { code: 1, name: "Chips (Small)",                    price: 5.0,  emoji: "🍟" },
+          { code: 2, name: "Chips (Large)",                    price: 10.0, emoji: "🍟" },
           { code: 3, name: "Chicken Tikka Snack Pack (Small)", price: 10.0, emoji: "🥡" },
           { code: 4, name: "Chicken Tikka Snack Pack (Large)", price: 20.0, emoji: "🥡" },
         ],
@@ -110,9 +170,22 @@ const RESTAURANTS = {
           { code: 2, name: "Chicken Tikka – 3 Skewers", price: 25.0, emoji: "🍗" },
           { code: 3, name: "Chicken Seekh – 2 Skewers", price: 18.0, emoji: "🥙" },
           { code: 4, name: "Chicken Seekh – 3 Skewers", price: 25.0, emoji: "🥙" },
-          { code: 5, name: "Lamb Chops – 3 Pieces", price: 20.0, emoji: "🥩" },
-          { code: 6, name: "Beef Seekh – 2 Skewers", price: 18.0, emoji: "🥓" },
+          { code: 5, name: "Lamb Chops – 3 Pieces",     price: 20.0, emoji: "🥩" },
+          { code: 6, name: "Beef Seekh – 2 Skewers",    price: 18.0, emoji: "🥓" },
           { code: 7, name: "Beef Chapli Kebab – 1 Kebab", price: 18.0, emoji: "🥘" },
+        ],
+      },
+      {
+        id: "addons",
+        label: "Add-ons & Breads",
+        emoji: "🥗",
+        items: [
+          { code: 1, name: "Garden Salad",          price: 2.0, emoji: "🥗" },
+          { code: 2, name: "Yogurt Sauce",          price: 0.5, emoji: "🥣" },
+          { code: 3, name: "Drinks (from)",         price: 3.0, emoji: "🥤" },
+          { code: 4, name: "Tandoori Roti",         price: 2.0, emoji: "🫓" },
+          { code: 5, name: "Naan / Souvlaki Bread", price: 2.5, emoji: "🫓" },
+          { code: 6, name: "Rice (300g)",           price: 3.0, emoji: "🍚" },
         ],
       },
       {
@@ -121,7 +194,7 @@ const RESTAURANTS = {
         emoji: "🍮",
         items: [
           { code: 1, name: "Gulab Jamun (1 pc)", price: 2.0, emoji: "🍮" },
-          { code: 2, name: "Kheer (200g)", price: 6.0, emoji: "🍚" },
+          { code: 2, name: "Kheer (200g)",       price: 6.0, emoji: "🍚" },
         ],
       },
     ],
@@ -131,8 +204,8 @@ const RESTAURANTS = {
 const RESTAURANT_ORDER = ["mandi", "fuadijan"];
 
 /* ============================ SESSIONS ============================ */
-// wa_id -> session state
-// step can be: rest, mandi_items, fu_cat, fu_items, qty, more, otype, addr, custname, guests, confirm
+// wa_id -> state
+// steps: rest, cat, items, qty, more, otype, addr, custname, guests, confirm
 const SESS = new Map();
 function getS(wa) {
   if (!SESS.has(wa)) {
@@ -142,8 +215,8 @@ function getS(wa) {
       categoryIdx: null,
       itemIdx: null,
       qty: null,
-      cart: [],            // [{name, emoji, price, qty, restaurant, category}]
-      orderType: null,     // Delivery / Take-away / Dine-in
+      cart: [],
+      orderType: null,   // Delivery / Take-away / Dine-in
       customerName: "",
       address: "",
       guests: null
@@ -182,60 +255,34 @@ function restaurantSelectionText() {
   return t;
 }
 
-function mandiMenuText() {
-  const r = RESTAURANTS.mandi;
-  let t = `📋 ${r.title} Menu\n\n`;
-  r.items.forEach(it => {
-    t += `${it.code}️⃣ ${it.emoji} ${it.name} — ${curf(it.price, r.currency)}\n`;
-  });
-  t += `\n👉 Reply with item number`;
-  return t;
-}
-
-function fuadijanCategoryText() {
-  const r = RESTAURANTS.fuadijan;
-  let t = `📋 ${r.title} — Choose a category:\n\n`;
-  r.categories.forEach((c, i) => { t += `${i + 1}️⃣ ${c.emoji} ${c.label}\n`; });
+function categoryText(restKey) {
+  const R = RESTAURANTS[restKey];
+  let t = `📋 ${R.title} — Choose a category:\n\n`;
+  R.categories.forEach((c, i) => { t += `${i + 1}️⃣ ${c.emoji} ${c.label}\n`; });
   t += `\n👉 Reply with a number`;
   return t;
 }
 
-function fuadijanItemsText(catIdx) {
-  const r = RESTAURANTS.fuadijan;
-  const cat = r.categories[catIdx];
-  let t = `${cat.emoji} ${r.title} — ${cat.label}\n\n`;
-  cat.items.forEach(it => { t += `${it.code}️⃣ ${it.emoji} ${it.name} — ${curf(it.price, r.currency)}\n`; });
+function itemsText(restKey, catIdx) {
+  const R = RESTAURANTS[restKey];
+  const cat = R.categories[catIdx];
+  let t = `${cat.emoji} ${R.title} — ${cat.label}\n\n`;
+  cat.items.forEach(it => { t += `${it.code}️⃣ ${it.emoji} ${it.name} — ${curf(it.price, R.currency)}\n`; });
   t += `\n👉 Reply with item number\n↩️ Type 0 to go Back`;
   return t;
 }
 
 function addMoreText() {
-  return (
-    "➕ Do you want anything else?\n\n" +
-    "1️⃣ Add more items\n" +
-    "2️⃣ Checkout"
-  );
+  return "➕ Do you want anything else?\n\n1️⃣ Add more items\n2️⃣ Checkout";
 }
 
 function orderTypeText() {
-  return (
-    "🚚 Choose order type:\n\n" +
-    "1️⃣ Delivery\n" +
-    "2️⃣ Take-away\n" +
-    "3️⃣ Dine-in\n\n" +
-    "👉 Reply with 1, 2, or 3"
-  );
+  return "🚚 Choose order type:\n\n1️⃣ Delivery\n2️⃣ Take-away\n3️⃣ Dine-in\n\n👉 Reply with 1, 2, or 3";
 }
 
-function addressText() {
-  return "📍 Please send your full delivery address (street, suburb, postcode).";
-}
-function customerNameText() {
-  return "👤 Please send your name for take-away pickup.";
-}
-function guestsText() {
-  return "👥 How many guests for dine-in? (1–20)";
-}
+const addressText     = () => "📍 Please send your full delivery address (street, suburb, postcode).";
+const customerNameText= () => "👤 Please send your name for take-away pickup.";
+const guestsText      = () => "👥 How many guests for dine-in? (1–20)";
 
 function cartSummary(s) {
   const lines = s.cart.map(ci => `• ${ci.emoji} ${ci.name} x ${ci.qty} — ${curf(ci.price * ci.qty)}`);
@@ -250,7 +297,6 @@ function confirmText(s) {
     s.orderType === "Delivery" ? `Delivery — ${s.address}` :
     s.orderType === "Take-away" ? `Take-away — ${s.customerName || "No name"}` :
     s.orderType === "Dine-in" ? `Dine-in — ${s.guests} guests` : "";
-
   return (
     `🧾 Order Summary\nRestaurant: ${rTitle}\n\n${text}\n\n` +
     `Order Type: ${otDetail}\nPayment: Pay on Counter\n` +
@@ -310,18 +356,14 @@ function isHello(t) {
 async function handleIncoming(wa, text) {
   const s = getS(wa);
 
-  // Global commands
+  // Global
   if (isHello(text) || text.toLowerCase() === "restart") {
     resetS(wa);
     return sendText(wa, restaurantSelectionText());
   }
-  if (text.toLowerCase() === "menu" && s.restaurantKey === "mandi") {
-    s.step = "mandi_items";
-    return sendText(wa, mandiMenuText());
-  }
-  if (text.toLowerCase() === "menu" && s.restaurantKey === "fuadijan") {
-    s.step = "fu_cat";
-    return sendText(wa, fuadijanCategoryText());
+  if (text.toLowerCase() === "menu" && s.restaurantKey) {
+    s.step = "cat";
+    return sendText(wa, categoryText(s.restaurantKey));
   }
 
   /* Step: choose restaurant */
@@ -329,141 +371,85 @@ async function handleIncoming(wa, text) {
     if (/^\d$/.test(text)) {
       const n = parseInt(text, 10);
       if (n >= 1 && n <= RESTAURANT_ORDER.length) {
-        const key = RESTAURANT_ORDER[n - 1];
-        s.restaurantKey = key;
-        if (key === "mandi") {
-          s.step = "mandi_items";
-          return sendText(wa, mandiMenuText());
-        } else {
-          s.step = "fu_cat";
-          return sendText(wa, fuadijanCategoryText());
-        }
+        s.restaurantKey = RESTAURANT_ORDER[n - 1];
+        s.step = "cat";
+        return sendText(wa, categoryText(s.restaurantKey));
       }
     }
     return sendText(wa, restaurantSelectionText());
   }
 
-  /* Mat'am Al Mandi: items -> qty -> more/checkout */
-  if (s.restaurantKey === "mandi") {
-    if (s.step === "mandi_items") {
-      const n = parseInt(text, 10);
-      const list = RESTAURANTS.mandi.items;
-      const item = list.find(it => it.code === n);
-      if (!item) return sendText(wa, "Please send a valid item number (1–3) or type menu.");
-      s.itemIdx = list.indexOf(item);
-      s.step = "qty";
-      return sendText(wa, `✅ You selected: ${item.emoji} ${item.name}\nPrice: ${curf(item.price)}\n\nPlease send *quantity* (1–99).`);
+  /* Step: choose category */
+  if (s.step === "cat" && s.restaurantKey) {
+    if (/^\d$/.test(text)) {
+      const idx = parseInt(text, 10) - 1;
+      const cats = RESTAURANTS[s.restaurantKey].categories;
+      if (idx >= 0 && idx < cats.length) {
+        s.categoryIdx = idx;
+        s.step = "items";
+        return sendText(wa, itemsText(s.restaurantKey, idx));
+      }
     }
+    return sendText(wa, categoryText(s.restaurantKey));
   }
 
-  /* Fuadijan: category -> items -> qty -> more/checkout */
-  if (s.restaurantKey === "fuadijan") {
-    if (s.step === "fu_cat") {
-      if (/^\d$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
-        const cats = RESTAURANTS.fuadijan.categories;
-        if (idx >= 0 && idx < cats.length) {
-          s.categoryIdx = idx;
-          s.step = "fu_items";
-          return sendText(wa, fuadijanItemsText(idx));
-        }
-      }
-      return sendText(wa, fuadijanCategoryText());
-    }
-
-    if (s.step === "fu_items") {
-      if (text === "0") {
-        s.categoryIdx = null;
-        s.step = "fu_cat";
-        return sendText(wa, fuadijanCategoryText());
-      }
-      const n = parseInt(text, 10);
-      const cat = RESTAURANTS.fuadijan.categories[s.categoryIdx];
-      const item = cat.items.find(it => it.code === n);
-      if (!item) return sendText(wa, "Please send a valid item number or 0 to go back.");
-      s.itemIdx = cat.items.indexOf(item);
-      s.step = "qty";
-      return sendText(wa, `✅ You selected: ${item.emoji} ${item.name}\nPrice: ${curf(item.price)}\n\nPlease send *quantity* (1–99).`);
-    }
+  /* Step: choose item inside category */
+  if (s.step === "items" && s.restaurantKey != null && s.categoryIdx != null) {
+    if (text === "0") { s.categoryIdx = null; s.step = "cat"; return sendText(wa, categoryText(s.restaurantKey)); }
+    const n = parseInt(text, 10);
+    const cat = RESTAURANTS[s.restaurantKey].categories[s.categoryIdx];
+    const item = cat.items.find(it => it.code === n);
+    if (!item) return sendText(wa, "Please send a valid item number or 0 to go back.");
+    s.itemIdx = cat.items.indexOf(item);
+    s.step = "qty";
+    return sendText(wa, `✅ You selected: ${item.emoji} ${item.name}\nPrice: ${curf(item.price, RESTAURANTS[s.restaurantKey].currency)}\n\nPlease send *quantity* (1–99).`);
   }
 
-  /* Step: quantity (for current selected item) */
+  /* Step: quantity → push to cart */
   if (s.step === "qty" && s.itemIdx != null) {
     if (/^\d{1,2}$/.test(text)) {
       const q = parseInt(text, 10);
       if (q >= 1 && q <= 99) {
-        s.qty = q;
+        const R = RESTAURANTS[s.restaurantKey];
+        const cat = R.categories[s.categoryIdx];
+        const it  = cat.items[s.itemIdx];
+        s.cart.push({ name: it.name, emoji: it.emoji, price: it.price, qty: q, restaurant: R.title, category: cat.label });
 
-        // Push to cart
-        if (s.restaurantKey === "mandi") {
-          const it = RESTAURANTS.mandi.items[s.itemIdx];
-          s.cart.push({ name: it.name, emoji: it.emoji, price: it.price, qty: q, restaurant: RESTAURANTS.mandi.title, category: null });
-        } else {
-          const cat = RESTAURANTS.fuadijan.categories[s.categoryIdx];
-          const it = cat.items[s.itemIdx];
-          s.cart.push({ name: it.name, emoji: it.emoji, price: it.price, qty: q, restaurant: RESTAURANTS.fuadijan.title, category: cat.label });
-        }
-
-        s.itemIdx = null;
-        s.qty = null;
+        // reset item selection
+        s.itemIdx = null; s.qty = null;
         s.step = "more";
-        const { text: itemsText, subtotal } = cartSummary(s);
-        await sendText(wa, `🛒 Cart Updated\n${itemsText}\nSubtotal: ${curf(subtotal)}\n`);
+        const { text: itemsTxt, subtotal } = cartSummary(s);
+        await sendText(wa, `🛒 Cart Updated\n${itemsTxt}\nSubtotal: ${curf(subtotal, R.currency)}\n`);
         return sendText(wa, addMoreText());
       }
     }
     return sendText(wa, "✖️ Please send a valid quantity (1–99).");
   }
 
-  /* Step: more (add more or checkout) */
+  /* Step: add more or checkout */
   if (s.step === "more") {
-    if (text === "1") {
-      // Add more → go back to menu start for the selected restaurant
-      if (s.restaurantKey === "mandi") {
-        s.step = "mandi_items";
-        return sendText(wa, mandiMenuText());
-      } else {
-        s.step = "fu_cat";
-        return sendText(wa, fuadijanCategoryText());
-      }
-    }
-    if (text === "2") {
-      s.step = "otype";
-      return sendText(wa, orderTypeText());
-    }
+    if (text === "1") { s.step = "cat"; return sendText(wa, categoryText(s.restaurantKey)); }
+    if (text === "2") { s.step = "otype"; return sendText(wa, orderTypeText()); }
     return sendText(wa, addMoreText());
   }
 
-  /* Step: order type (now after checkout) */
+  /* Step: order type and details */
   if (s.step === "otype") {
     if (/^[123]$/.test(text)) {
       const map = { 1: "Delivery", 2: "Take-away", 3: "Dine-in" };
       s.orderType = map[parseInt(text, 10)];
-      if (s.orderType === "Delivery") { s.step = "addr"; return sendText(wa, addressText()); }
+      if (s.orderType === "Delivery")  { s.step = "addr";     return sendText(wa, addressText()); }
       if (s.orderType === "Take-away") { s.step = "custname"; return sendText(wa, customerNameText()); }
-      if (s.orderType === "Dine-in") { s.step = "guests"; return sendText(wa, guestsText()); }
+      if (s.orderType === "Dine-in")   { s.step = "guests";   return sendText(wa, guestsText()); }
     }
     return sendText(wa, orderTypeText());
   }
 
-  /* Step: collect address / name / guests */
-  if (s.step === "addr") {
-    s.address = text;
-    s.step = "confirm";
-    return sendText(wa, confirmText(s));
-  }
-  if (s.step === "custname") {
-    s.customerName = text;
-    s.step = "confirm";
-    return sendText(wa, confirmText(s));
-  }
+  if (s.step === "addr")     { s.address = text;      s.step = "confirm"; return sendText(wa, confirmText(s)); }
+  if (s.step === "custname") { s.customerName = text; s.step = "confirm"; return sendText(wa, confirmText(s)); }
   if (s.step === "guests") {
     const g = parseInt(text, 10);
-    if (!isNaN(g) && g >= 1 && g <= 20) {
-      s.guests = g;
-      s.step = "confirm";
-      return sendText(wa, confirmText(s));
-    }
+    if (!isNaN(g) && g >= 1 && g <= 20) { s.guests = g; s.step = "confirm"; return sendText(wa, confirmText(s)); }
     return sendText(wa, "Please send a valid number of guests (1–20).");
   }
 
@@ -472,8 +458,6 @@ async function handleIncoming(wa, text) {
     const ans = text.toLowerCase();
     if (ans === "yes") {
       const { subtotal } = cartSummary(s);
-
-      // Build DB record (single row)
       const itemsStr = s.cart.map(ci => `${ci.name} x ${ci.qty}`).join("; ");
       const totalQty = s.cart.reduce((acc, ci) => acc + ci.qty, 0);
       const orderTypeDetail =
@@ -499,10 +483,7 @@ async function handleIncoming(wa, text) {
       );
       return resetS(wa);
     }
-    if (ans === "no") {
-      resetS(wa);
-      return sendText(wa, "❌ Order cancelled.\nType *restart* to start again.");
-    }
+    if (ans === "no") { resetS(wa); return sendText(wa, "❌ Order cancelled.\nType *restart* to start again."); }
     return sendText(wa, "Please reply *yes* to confirm or *no* to cancel.");
   }
 
