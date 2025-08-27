@@ -1,16 +1,16 @@
 /* index.js - WhatsApp Cloud API Bot (Mandi + Fuadijan)
- * - English prompts with boxed digits
- * - Smart parsing (1 / 1️⃣ / text keywords)
- * - Buttons for Add-more/Checkout and Order Type
+ * - English prompts with boxed digits (1️⃣ 2️⃣ 3️⃣)
+ * - Smart parsing (digits/emoji/words/keywords)
+ * - Buttons for Add-more / Checkout + Order Type
  * - Prices + totals
  * - Airtable Table ID > Name fallback
  * - WHATSAPP_TOKEN or ACCESS_TOKEN fallback
  *
- * ENV needed:
+ * ENV:
  * PORT=3000
  * VERIFY_TOKEN=...
  * PHONE_NUMBER_ID=...
- * WHATSAPP_TOKEN=... (or ACCESS_TOKEN)
+ * WHATSAPP_TOKEN=...  (or use ACCESS_TOKEN)
  * ACCESS_TOKEN=...
  *
  * AIRTABLE_API_KEY=pat_xxx
@@ -266,6 +266,7 @@ Reply with the number (e.g., 1).`
 function itemsPrompt(restKey, catCode) {
   const cat = MENUS[restKey].categories[catCode];
   if (!cat) return "Invalid category. Please try again.";
+
   const lines = cat.items
     .map((it, idx) => `${idx + 1}️⃣  ${it.name} — $${it.price.toFixed(2)}`)
     .join("\n");
@@ -327,7 +328,7 @@ const AX_HEADERS = {
   "Content-Type": "application/json",
 };
 
-// ===== Airtable save (match your columns exactly) =====
+// ===== Airtable save (match your exact columns) =====
 async function saveRecordToAirtable_MANDI(data) {
   const key = tableKey(AIRTABLE_TABLE_ID_MANDI, AIRTABLE_TABLE_MANDI);
   const fields = {
@@ -338,7 +339,7 @@ async function saveRecordToAirtable_MANDI(data) {
     "Address": data.address || "",
     "Status": "Pending",
     "Order Time": new Date().toISOString(),
-    // Required field in your table:
+    // Required in your table:
     "Attachment": [{ url: "https://via.placeholder.com/150" }],
   };
   return axios.post(airtableUrl(AIRTABLE_BASE_ID_MANDI, key), { fields }, { headers: AX_HEADERS });
@@ -355,4 +356,259 @@ async function saveRecordToAirtable_FUADIJAN(data) {
     "Address": data.address || "",
     "OrderTime": new Date().toISOString(),
   };
-  return axios.post
+  return axios.post(airtableUrl(AIRTABLE_BASE_ID_FUADIJAN, key), { fields }, { headers: AX_HEADERS });
+}
+
+async function saveCartToAirtable(restKey, phone, session) {
+  const saves = session.cart.map((c) => {
+    const payload = {
+      phone,
+      item: c.item,
+      qty: c.qty,
+      orderType: session.orderType,
+      address: session.address,
+      customerName: session.customerName,
+    };
+    return restKey === "MANDI"
+      ? saveRecordToAirtable_MANDI(payload)
+      : saveRecordToAirtable_FUADIJAN(payload);
+  });
+
+  try {
+    await Promise.all(saves);
+    return true;
+  } catch (e) {
+    console.error("Airtable save error:", e?.response?.data || e.message);
+    return false;
+  }
+}
+
+// ===== Webhook Verify =====
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
+  return res.sendStatus(403);
+});
+
+// ===== Webhook Receive =====
+app.post("/webhook", async (req, res) => {
+  try {
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const messages = value?.messages;
+
+    if (!messages || messages.length === 0) return res.sendStatus(200);
+
+    const msg = messages[0];
+    const from = msg.from;
+    const buttonId = msg.interactive?.button_reply?.id || null;
+    const incomingText = (msg.text?.body || "").trim();
+    const normNum = normalizeAnswer(incomingText);
+
+    if (!SESSIONS[from]) startSession(from);
+    const s = SESSIONS[from];
+
+    // Commands
+    if (/^reset$/i.test(incomingText)) {
+      resetSession(from);
+      await sendText(from, restaurantPrompt());
+      return res.sendStatus(200);
+    }
+    if (/^menu$/i.test(incomingText)) {
+      s.step = "ASK_RESTAURANT";
+      s.cart = [];
+      await sendText(from, restaurantPrompt());
+      return res.sendStatus(200);
+    }
+
+    // Flow
+    switch (s.step) {
+      case "ASK_RESTAURANT": {
+        // (Optional) You can add buttons for restaurants if you want
+        if (normNum === 1) s.restaurant = "MANDI";
+        else if (normNum === 2) s.restaurant = "FUADIJAN";
+        else {
+          await sendText(from, restaurantPrompt());
+          break;
+        }
+        s.step = "ASK_CATEGORY";
+        await sendText(from, categoriesPrompt(s.restaurant));
+        break;
+      }
+
+      case "ASK_CATEGORY": {
+        const catPick = normNum;
+        const cat = MENUS[s.restaurant].categories[String(catPick)];
+        if (!cat) {
+          await sendText(from, "Please choose a valid option.\n" + categoriesPrompt(s.restaurant));
+          break;
+        }
+        s.category = String(catPick);
+        s.step = "ASK_ITEM";
+        await sendText(from, itemsPrompt(s.restaurant, s.category));
+        break;
+      }
+
+      case "ASK_ITEM": {
+        const cat = MENUS[s.restaurant].categories[s.category];
+        const idx = normNum;
+        if (!idx || idx < 1 || idx > cat.items.length) {
+          await sendText(from, "Invalid item number.\n" + itemsPrompt(s.restaurant, s.category));
+          break;
+        }
+        const chosen = cat.items[idx - 1];
+        s.item = chosen.name;
+        s.itemPrice = chosen.price;
+        s.step = "ASK_QTY";
+        await sendText(from, "How many? (e.g., 1, 2, 3)");
+        break;
+      }
+
+      case "ASK_QTY": {
+        const q = normNum;
+        if (!q || q < 1) {
+          await sendText(from, "Invalid quantity. Enter 1 or higher.");
+          break;
+        }
+        s.qty = q;
+        s.cart.push({ item: s.item, qty: s.qty, price: s.itemPrice });
+        s.item = null;
+        s.itemPrice = null;
+        s.qty = null;
+
+        await sendButtons(from, `Your cart total: $${calcTotal(s.cart).toFixed(2)}\nChoose an option:`, [
+          { id: "btn_add_more", title: "Add more" },
+          { id: "btn_checkout", title: "Checkout" },
+        ]);
+        s.step = "ADD_MORE_OR_CHECKOUT";
+        await sendText(from, addMoreOrCheckoutPrompt(s.cart));
+        break;
+      }
+
+      case "ADD_MORE_OR_CHECKOUT": {
+        const picked = buttonId ||
+          (normNum === 1 ? "btn_add_more" : normNum === 2 ? "btn_checkout" : null);
+
+        if (picked === "btn_add_more") {
+          s.step = "ASK_CATEGORY";
+          await sendText(from, categoriesPrompt(s.restaurant));
+        } else if (picked === "btn_checkout") {
+          s.step = "ASK_ORDER_TYPE";
+          await sendButtons(from, "Select order type:", [
+            { id: "ord_delivery", title: "Delivery" },
+            { id: "ord_takeaway", title: "Take-away" },
+            { id: "ord_dinein",  title: "Dine-in" },
+          ]);
+          await sendText(from, orderTypePrompt());
+        } else {
+          await sendText(from, "Please choose 1 or 2.\n" + addMoreOrCheckoutPrompt(s.cart));
+        }
+        break;
+      }
+
+      case "ASK_ORDER_TYPE": {
+        let choice = null;
+        if (buttonId === "ord_delivery") choice = 1;
+        else if (buttonId === "ord_takeaway") choice = 2;
+        else if (buttonId === "ord_dinein")  choice = 3;
+        else choice = normNum;
+
+        if (choice === 1) {
+          s.orderType = "Delivery";
+          s.step = "ASK_ADDRESS";
+          await sendText(from, "Please enter the delivery address:");
+        } else if (choice === 2) {
+          s.orderType = "Take-away";
+          s.step = "ASK_NAME";
+          await sendText(from, "Please enter your name for take-away:");
+        } else if (choice === 3) {
+          s.orderType = "Dine-in";
+          s.step = "ASK_GUESTS";
+          await sendText(from, "Number of guests (e.g., 2):");
+        } else {
+          await sendText(from, "Please choose 1/2/3.\n" + orderTypePrompt());
+        }
+        break;
+      }
+
+      case "ASK_ADDRESS": {
+        s.address = incomingText;
+        s.step = "CONFIRM_AND_SAVE";
+        await handleConfirmAndSave(from, s);
+        break;
+      }
+
+      case "ASK_NAME": {
+        s.customerName = incomingText;
+        s.step = "CONFIRM_AND_SAVE";
+        await handleConfirmAndSave(from, s);
+        break;
+      }
+
+      case "ASK_GUESTS": {
+        const g = normNum;
+        if (!g || g < 1) {
+          await sendText(from, "Invalid number. Please enter 1 or higher.");
+          break;
+        }
+        s.guests = g;
+        s.step = "CONFIRM_AND_SAVE";
+        await handleConfirmAndSave(from, s);
+        break;
+      }
+
+      default: {
+        s.step = "ASK_RESTAURANT";
+        await sendText(from, restaurantPrompt());
+      }
+    }
+
+    res.sendStatus(200);
+  } catch (e) {
+    console.error("Webhook handler error:", e?.response?.data || e.message);
+    res.sendStatus(200);
+  }
+});
+
+// ===== Summary + Save =====
+async function handleConfirmAndSave(phone, session) {
+  const rName = MENUS[session.restaurant].name;
+  const addressLine = session.orderType === "Delivery" ? `\n📍 Address: ${session.address}` : "";
+  const nameLine = session.orderType === "Take-away" ? `\n👤 Name: ${session.customerName}` : "";
+  const guestsLine = session.orderType === "Dine-in" ? `\n👥 Guests: ${session.guests}` : "";
+
+  const total = calcTotal(session.cart);
+  const summary =
+    `✅ Order Confirmed\n` +
+    `Restaurant: ${rName}\n` +
+    `Items:\n${fmtCart(session.cart)}\n` +
+    `\n*Subtotal:* $${total.toFixed(2)}` +
+    `\nOrder Type: ${session.orderType}` +
+    addressLine + nameLine + guestsLine +
+    `\n\n💳 Payment: Pay on Counter`;
+
+  await sendText(phone, summary);
+  await sendText(phone, "Saving your order…");
+
+  const ok = await saveCartToAirtable(session.restaurant, phone, session);
+
+  if (ok) {
+    await sendText(phone, "✅ Saved to Airtable. Thank you!");
+  } else {
+    await sendText(phone, "⚠️ Error saving to Airtable. Please try again later or contact support.");
+  }
+
+  await sendText(phone, "Type 'menu' to order again, or 'reset' to start fresh.");
+  resetSession(phone);
+}
+
+// ===== Healthcheck =====
+app.get("/", (_req, res) => res.send("OK"));
+
+// ===== Start =====
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
