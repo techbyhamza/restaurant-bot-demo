@@ -1,4 +1,4 @@
-// WhatsApp Restaurant Bot (Express + Cloud API) — Multi-restaurant + Categories + OrderType
+// WhatsApp Restaurant Bot — Multi-restaurant + Categories + Cart + OrderType details
 // CommonJS (no "type":"module"), ready for Railway
 
 const express = require("express");
@@ -27,7 +27,6 @@ const DB_FIELDS = {
   OrderTime: "OrderTime",
 };
 
-// Restaurants definition
 const RESTAURANTS = {
   mandi: {
     title: "Mat'am Al Mandi",
@@ -117,19 +116,6 @@ const RESTAURANTS = {
         ],
       },
       {
-        id: "addons",
-        label: "Add-ons & Breads",
-        emoji: "🥗",
-        items: [
-          { code: 1, name: "Garden Salad", price: 2.0, emoji: "🥗" },
-          { code: 2, name: "Yogurt Sauce", price: 0.5, emoji: "🥣" },
-          { code: 3, name: "Drinks (from)", price: 3.0, emoji: "🥤" },
-          { code: 4, name: "Tandoori Roti", price: 2.0, emoji: "🫓" },
-          { code: 5, name: "Naan / Souvlaki Bread", price: 2.5, emoji: "🫓" },
-          { code: 6, name: "Rice (300g)", price: 3.0, emoji: "🍚" },
-        ],
-      },
-      {
         id: "sweets",
         label: "Sweets",
         emoji: "🍮",
@@ -142,11 +128,11 @@ const RESTAURANTS = {
   },
 };
 
-// Order of restaurants at selection page
 const RESTAURANT_ORDER = ["mandi", "fuadijan"];
 
 /* ============================ SESSIONS ============================ */
-// wa_id -> { step, restaurantKey, categoryIdx, itemIdx, qty, orderType, customerName, address }
+// wa_id -> session state
+// step can be: rest, mandi_items, fu_cat, fu_items, qty, more, otype, addr, custname, guests, confirm
 const SESS = new Map();
 function getS(wa) {
   if (!SESS.has(wa)) {
@@ -156,9 +142,11 @@ function getS(wa) {
       categoryIdx: null,
       itemIdx: null,
       qty: null,
-      orderType: null,
+      cart: [],            // [{name, emoji, price, qty, restaurant, category}]
+      orderType: null,     // Delivery / Take-away / Dine-in
       customerName: "",
       address: "",
+      guests: null
     });
   }
   return SESS.get(wa);
@@ -170,9 +158,11 @@ function resetS(wa) {
     categoryIdx: null,
     itemIdx: null,
     qty: null,
+    cart: [],
     orderType: null,
     customerName: "",
     address: "",
+    guests: null
   });
 }
 
@@ -205,9 +195,7 @@ function mandiMenuText() {
 function fuadijanCategoryText() {
   const r = RESTAURANTS.fuadijan;
   let t = `📋 ${r.title} — Choose a category:\n\n`;
-  r.categories.forEach((c, i) => {
-    t += `${i + 1}️⃣ ${c.emoji} ${c.label}\n`;
-  });
+  r.categories.forEach((c, i) => { t += `${i + 1}️⃣ ${c.emoji} ${c.label}\n`; });
   t += `\n👉 Reply with a number`;
   return t;
 }
@@ -216,11 +204,17 @@ function fuadijanItemsText(catIdx) {
   const r = RESTAURANTS.fuadijan;
   const cat = r.categories[catIdx];
   let t = `${cat.emoji} ${r.title} — ${cat.label}\n\n`;
-  cat.items.forEach(it => {
-    t += `${it.code}️⃣ ${it.emoji} ${it.name} — ${curf(it.price, r.currency)}\n`;
-  });
+  cat.items.forEach(it => { t += `${it.code}️⃣ ${it.emoji} ${it.name} — ${curf(it.price, r.currency)}\n`; });
   t += `\n👉 Reply with item number\n↩️ Type 0 to go Back`;
   return t;
+}
+
+function addMoreText() {
+  return (
+    "➕ Do you want anything else?\n\n" +
+    "1️⃣ Add more items\n" +
+    "2️⃣ Checkout"
+  );
 }
 
 function orderTypeText() {
@@ -230,6 +224,38 @@ function orderTypeText() {
     "2️⃣ Take-away\n" +
     "3️⃣ Dine-in\n\n" +
     "👉 Reply with 1, 2, or 3"
+  );
+}
+
+function addressText() {
+  return "📍 Please send your full delivery address (street, suburb, postcode).";
+}
+function customerNameText() {
+  return "👤 Please send your name for take-away pickup.";
+}
+function guestsText() {
+  return "👥 How many guests for dine-in? (1–20)";
+}
+
+function cartSummary(s) {
+  const lines = s.cart.map(ci => `• ${ci.emoji} ${ci.name} x ${ci.qty} — ${curf(ci.price * ci.qty)}`);
+  const subtotal = s.cart.reduce((acc, ci) => acc + ci.price * ci.qty, 0);
+  return { text: lines.join("\n"), subtotal };
+}
+
+function confirmText(s) {
+  const { text, subtotal } = cartSummary(s);
+  const rTitle = s.cart[0]?.restaurant || "";
+  const otDetail =
+    s.orderType === "Delivery" ? `Delivery — ${s.address}` :
+    s.orderType === "Take-away" ? `Take-away — ${s.customerName || "No name"}` :
+    s.orderType === "Dine-in" ? `Dine-in — ${s.guests} guests` : "";
+
+  return (
+    `🧾 Order Summary\nRestaurant: ${rTitle}\n\n${text}\n\n` +
+    `Order Type: ${otDetail}\nPayment: Pay on Counter\n` +
+    `Total: ${curf(subtotal)}\n\n` +
+    `✅ Confirm → type *yes*\n❌ Cancel → type *no*`
   );
 }
 
@@ -290,9 +316,10 @@ async function handleIncoming(wa, text) {
     return sendText(wa, restaurantSelectionText());
   }
   if (text.toLowerCase() === "menu" && s.restaurantKey === "mandi") {
+    s.step = "mandi_items";
     return sendText(wa, mandiMenuText());
   }
-  if (text.toLowerCase() === "menu" && s.restaurantKey === "fuadijan" && s.step !== "fu_items") {
+  if (text.toLowerCase() === "menu" && s.restaurantKey === "fuadijan") {
     s.step = "fu_cat";
     return sendText(wa, fuadijanCategoryText());
   }
@@ -316,7 +343,7 @@ async function handleIncoming(wa, text) {
     return sendText(wa, restaurantSelectionText());
   }
 
-  /* Mat'am Al Mandi: items -> order type -> qty -> confirm */
+  /* Mat'am Al Mandi: items -> qty -> more/checkout */
   if (s.restaurantKey === "mandi") {
     if (s.step === "mandi_items") {
       const n = parseInt(text, 10);
@@ -324,12 +351,12 @@ async function handleIncoming(wa, text) {
       const item = list.find(it => it.code === n);
       if (!item) return sendText(wa, "Please send a valid item number (1–3) or type menu.");
       s.itemIdx = list.indexOf(item);
-      s.step = "otype";               // NEW
-      return sendText(wa, orderTypeText());
+      s.step = "qty";
+      return sendText(wa, `✅ You selected: ${item.emoji} ${item.name}\nPrice: ${curf(item.price)}\n\nPlease send *quantity* (1–99).`);
     }
   }
 
-  /* Fuadijan: category -> items -> order type -> qty -> confirm */
+  /* Fuadijan: category -> items -> qty -> more/checkout */
   if (s.restaurantKey === "fuadijan") {
     if (s.step === "fu_cat") {
       if (/^\d$/.test(text)) {
@@ -355,70 +382,120 @@ async function handleIncoming(wa, text) {
       const item = cat.items.find(it => it.code === n);
       if (!item) return sendText(wa, "Please send a valid item number or 0 to go back.");
       s.itemIdx = cat.items.indexOf(item);
-      s.step = "otype";               // NEW
-      return sendText(wa, orderTypeText());
-    }
-  }
-
-  /* Step: order type (Delivery / Take-away / Dine-in) */
-  if (s.step === "otype" && s.itemIdx != null) {
-    if (/^[123]$/.test(text)) {
-      const map = { 1: "Delivery", 2: "Take-away", 3: "Dine-in" };
-      s.orderType = map[parseInt(text, 10)];
       s.step = "qty";
-      return sendText(wa, "Please send *quantity* (1–99).");
+      return sendText(wa, `✅ You selected: ${item.emoji} ${item.name}\nPrice: ${curf(item.price)}\n\nPlease send *quantity* (1–99).`);
     }
-    return sendText(wa, orderTypeText());
   }
 
-  /* Step: quantity */
+  /* Step: quantity (for current selected item) */
   if (s.step === "qty" && s.itemIdx != null) {
     if (/^\d{1,2}$/.test(text)) {
       const q = parseInt(text, 10);
       if (q >= 1 && q <= 99) {
         s.qty = q;
-        s.step = "confirm";
-        const { item, r, catLabel } = getSelectedItemDetails(s);
-        const total = (item.price * q).toFixed(2);
-        return sendText(
-          wa,
-          `🧾 Order Summary\n` +
-            `Restaurant: ${r.title}${catLabel ? `\nCategory: ${catLabel}` : ""}\n` +
-            `Item: ${item.emoji} ${item.name}\n` +
-            `Order Type: ${s.orderType}\n` +
-            `Qty: ${q}\n` +
-            `Total: ${curf(total, r.currency)}\n\n` +
-            `✅ Confirm → type *yes*\n❌ Cancel → type *no*`
-        );
+
+        // Push to cart
+        if (s.restaurantKey === "mandi") {
+          const it = RESTAURANTS.mandi.items[s.itemIdx];
+          s.cart.push({ name: it.name, emoji: it.emoji, price: it.price, qty: q, restaurant: RESTAURANTS.mandi.title, category: null });
+        } else {
+          const cat = RESTAURANTS.fuadijan.categories[s.categoryIdx];
+          const it = cat.items[s.itemIdx];
+          s.cart.push({ name: it.name, emoji: it.emoji, price: it.price, qty: q, restaurant: RESTAURANTS.fuadijan.title, category: cat.label });
+        }
+
+        s.itemIdx = null;
+        s.qty = null;
+        s.step = "more";
+        const { text: itemsText, subtotal } = cartSummary(s);
+        await sendText(wa, `🛒 Cart Updated\n${itemsText}\nSubtotal: ${curf(subtotal)}\n`);
+        return sendText(wa, addMoreText());
       }
     }
     return sendText(wa, "✖️ Please send a valid quantity (1–99).");
   }
 
+  /* Step: more (add more or checkout) */
+  if (s.step === "more") {
+    if (text === "1") {
+      // Add more → go back to menu start for the selected restaurant
+      if (s.restaurantKey === "mandi") {
+        s.step = "mandi_items";
+        return sendText(wa, mandiMenuText());
+      } else {
+        s.step = "fu_cat";
+        return sendText(wa, fuadijanCategoryText());
+      }
+    }
+    if (text === "2") {
+      s.step = "otype";
+      return sendText(wa, orderTypeText());
+    }
+    return sendText(wa, addMoreText());
+  }
+
+  /* Step: order type (now after checkout) */
+  if (s.step === "otype") {
+    if (/^[123]$/.test(text)) {
+      const map = { 1: "Delivery", 2: "Take-away", 3: "Dine-in" };
+      s.orderType = map[parseInt(text, 10)];
+      if (s.orderType === "Delivery") { s.step = "addr"; return sendText(wa, addressText()); }
+      if (s.orderType === "Take-away") { s.step = "custname"; return sendText(wa, customerNameText()); }
+      if (s.orderType === "Dine-in") { s.step = "guests"; return sendText(wa, guestsText()); }
+    }
+    return sendText(wa, orderTypeText());
+  }
+
+  /* Step: collect address / name / guests */
+  if (s.step === "addr") {
+    s.address = text;
+    s.step = "confirm";
+    return sendText(wa, confirmText(s));
+  }
+  if (s.step === "custname") {
+    s.customerName = text;
+    s.step = "confirm";
+    return sendText(wa, confirmText(s));
+  }
+  if (s.step === "guests") {
+    const g = parseInt(text, 10);
+    if (!isNaN(g) && g >= 1 && g <= 20) {
+      s.guests = g;
+      s.step = "confirm";
+      return sendText(wa, confirmText(s));
+    }
+    return sendText(wa, "Please send a valid number of guests (1–20).");
+  }
+
   /* Step: confirm */
-  if (s.step === "confirm" && s.itemIdx != null && s.qty) {
+  if (s.step === "confirm") {
     const ans = text.toLowerCase();
     if (ans === "yes") {
-      const { item, r } = getSelectedItemDetails(s);
-      const total = (item.price * s.qty).toFixed(2);
+      const { subtotal } = cartSummary(s);
 
-      // TODO: Save to Airtable/DB using field names below
+      // Build DB record (single row)
+      const itemsStr = s.cart.map(ci => `${ci.name} x ${ci.qty}`).join("; ");
+      const totalQty = s.cart.reduce((acc, ci) => acc + ci.qty, 0);
+      const orderTypeDetail =
+        s.orderType === "Delivery" ? `Delivery — ${s.address}` :
+        s.orderType === "Take-away" ? `Take-away — ${s.customerName || ""}` :
+        s.orderType === "Dine-in" ? `Dine-in — ${s.guests} guests` : "";
+
       const record = {
         [DB_FIELDS.CustomerName]: s.customerName || "",
         [DB_FIELDS.PhoneNumber]: wa,
-        [DB_FIELDS.MenuItem]: `${r.title} - ${item.name}`,
-        [DB_FIELDS.Quantity]: s.qty,
+        [DB_FIELDS.MenuItem]: itemsStr,
+        [DB_FIELDS.Quantity]: totalQty,
         [DB_FIELDS.Address]: s.address || "",
-        [DB_FIELDS.OrderType]: s.orderType || "",
+        [DB_FIELDS.OrderType]: orderTypeDetail,
         [DB_FIELDS.OrderTime]: new Date().toISOString(),
       };
-      // console.log("Would save:", record);
+      // TODO: saveToAirtable(record)
 
       await sendText(
         wa,
-        `🎉 Order confirmed!\n${item.emoji} ${item.name} x ${s.qty}\n` +
-          `Order Type: ${s.orderType}\nTotal: ${curf(total, r.currency)}\n\n` +
-          `Type *menu* to order again or *restart* to switch restaurant.`
+        `🎉 Order confirmed!\nPayment: Pay on Counter\nTotal: ${curf(subtotal)}\n\n` +
+        `Type *menu* to order again or *restart* to switch restaurant.`
       );
       return resetS(wa);
     }
@@ -431,19 +508,6 @@ async function handleIncoming(wa, text) {
 
   // fallback
   return sendText(wa, "Type *restart* to start over.");
-}
-
-function getSelectedItemDetails(s) {
-  const key = s.restaurantKey;
-  const r = RESTAURANTS[key];
-  if (key === "mandi") {
-    const item = r.items[s.itemIdx];
-    return { item, r, catLabel: null };
-  } else {
-    const cat = r.categories[s.categoryIdx];
-    const item = cat.items[s.itemIdx];
-    return { item, r, catLabel: cat.label };
-  }
 }
 
 /* ============================== Start ============================ */
