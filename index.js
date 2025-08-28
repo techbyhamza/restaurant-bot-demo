@@ -1,5 +1,5 @@
-// index.js — Restaurant WhatsApp Bot (with Prices)
-// Node 18+ recommended
+// index.js — Restaurant Online Ordering (WhatsApp Cloud API)
+// Node 18+
 
 const express = require("express");
 const axios = require("axios");
@@ -20,7 +20,7 @@ const {
   AIRTABLE_TABLE_ID_FUADIJAN,
 } = process.env;
 
-// ------------ WA HELPERS ------------
+// ------------ HELPERS ------------
 async function sendText(to, body) {
   const url = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
   await axios.post(
@@ -56,7 +56,6 @@ function reset(p){ sessions.delete(p); }
 const cartTotal = (cart)=>cart.reduce((s,c)=>s + c.price * c.qty, 0);
 
 // ------------ MENUS + PRICES -------------
-// Tip: اگر کسی قیمت میں تبدیلی کرنی ہو تو نیچے PRICES میں کریں — باقی کوڈ خود بخود اپڈیٹ ہو جائے گا۔
 const MENUS = {
   MANDI: {
     name: "Mataam Al Arabi",
@@ -91,7 +90,7 @@ const MENUS = {
   },
 };
 
-// PRICES: { [menuKey]: [ {label, price}, ... ] }
+// PRICES
 const PRICES = {
   // ----- Mataam Al Arabi -----
   mandi_single: [
@@ -109,7 +108,6 @@ const PRICES = {
     { label: "Family Mandi Meal (Medium)", price: 90 },
     { label: "Family Mandi Meal (Large)", price: 120 },
     { label: "Special Family Mandi", price: 125 },
-    // Whole lamb often pre-order; price varies. Update as needed:
     { label: "Whole Lamb Mandi (pre-order)", price: 600 },
   ],
   curries: [
@@ -195,7 +193,7 @@ const PRICES = {
     { label: "Chicken Seekh — 3 Skewers", price: 25 },
     { label: "Beef Seekh — 2 Skewers", price: 18 },
     { label: "Beef Seekh — 3 Skewers", price: 25 },
-    { label: "Beef Chapli Kebab — 1", price: 10 }, // adjust if needed
+    { label: "Beef Chapli Kebab — 1", price: 10 },
     { label: "Lamb Chops — 3 pieces", price: 20 },
   ],
   addons: [
@@ -218,82 +216,113 @@ const PRICES = {
   ],
 };
 
-// map Fuadijan categories to PRICES keys
+// Map for Fuadijan special keys
 const KEY_MAP = {
-  MANDI: {}, // already aligned
+  MANDI: {},
   FUADIJAN: {
     desserts: "desserts_fuadijan",
     drinks: "drinks_fuadijan",
   },
 };
 
-// ------------ TEMPLATES ------------
-function welcome() {
-  return [
-    "👋 Welcome to our Online Ordering Bot!",
-    "Select your restaurant:",
-    `${box(1)} ${MENUS.MANDI.name} 🍖 — ${MENUS.MANDI.tagline}`,
-    `${box(2)} ${MENUS.FUADIJAN.name} 🌶️ — ${MENUS.FUADIJAN.tagline}`,
-    "",
-    "Type the number. Send 'menu' anytime to restart, or 'reset' to clear."
-  ].join("\n");
-}
-function categoriesPrompt(restKey) {
-  const { name, categories } = MENUS[restKey];
-  const rows = categories.map(c => `${box(c.code)} ${c.title}`);
-  return ["📋 " + name + " — choose a category:", "", ...rows].join("\n");
-}
 function itemsFor(restKey, menuKey) {
-  const effectiveKey = restKey === "FUADIJAN" && KEY_MAP.FUADIJAN[menuKey] ? KEY_MAP.FUADIJAN[menuKey] : menuKey;
+  const effectiveKey = restKey === "FUADIJAN" && KEY_MAP.FUADIJAN[menuKey]
+    ? KEY_MAP.FUADIJAN[menuKey]
+    : menuKey;
   return PRICES[effectiveKey] || [];
 }
+
+// ------------ TEMPLATES (Welcome spaced, others compact) ------------
+function welcome() {
+  return [
+    "👋 Welcome to the Online Ordering System!",
+    "",
+    "✨ Please choose a restaurant:",
+    "",
+    `${box(1)} ${MENUS.MANDI.name} 🍖`,
+    `   ${MENUS.MANDI.tagline}`,
+    "",
+    `${box(2)} ${MENUS.FUADIJAN.name} 🌶️`,
+    `   ${MENUS.FUADIJAN.tagline}`,
+    "",
+    "────────────────────────",
+    "",
+    "💡 Type the number to continue.",
+    "🔄 Send 'menu' anytime to restart, or 'reset' to clear."
+  ].join("\n");
+}
+
+function categoriesPrompt(restKey) {
+  const { name, categories } = MENUS[restKey];
+  const rows = categories.map(c => `${box(c.code)} ${c.title}`).join("\n");
+  return [
+    `📋 ${name}`,
+    "────────────────────────",
+    "Please choose a category:",
+    rows
+  ].join("\n");
+}
+
 function itemsPrompt(restKey, catCode) {
   const cat = MENUS[restKey].categories.find(c => c.code === catCode);
   const items = itemsFor(restKey, cat.key);
-  const rows = items.map((it, idx) => `${box(idx+1)} ${it.label} — ${AUD(it.price)}`);
-  return [`🔎 ${cat.title}`, "Select an item:", "", ...rows].join("\n");
+  const rows = items.map((it, idx) => `${box(idx+1)} ${it.label} — ${AUD(it.price)}`).join("\n");
+  return [
+    `🔎 ${cat.title}`,
+    "────────────────────────",
+    "Please choose an item:",
+    rows
+  ].join("\n");
 }
+
 function qtyPrompt(item, price) {
   return `How many for “${item}” (${AUD(price)})? Reply with a number (e.g., 1, 2, 3).`;
 }
+
 function addOrCheckoutPrompt(cart) {
-  const lines = cart.map((c,i)=>`${i+1}) ${c.item} × ${c.qty} = ${AUD(c.price*c.qty)}`).join("\n");
+  const lines = cart.map(
+    (c,i)=>`${i+1}) ${c.item} × ${c.qty} = ${AUD(c.price*c.qty)}`
+  ).join("\n");
   return [
-    "Added to cart ✅",
-    "",
-    "🛒 Cart:",
+    "✅ Item added to cart",
+    "🛒 Your Cart",
+    "────────────────────────",
     lines || "(empty)",
-    "",
     `Subtotal: ${AUD(cartTotal(cart))}`,
-    "",
-    `${box(1)} Add more`,
-    `${box(2)} Checkout`,
+    `${box(1)} Add more items`,
+    `${box(2)} Proceed to Checkout`
   ].join("\n");
 }
+
 function orderTypePrompt() {
   return [
-    "Choose order type:",
-    "",
-    `${box(1)} Delivery 🚚`,
-    `${box(2)} Takeaway 📦`,
-    `${box(3)} Dine-in 🍽️`,
+    "🚚 Choose order type",
+    "────────────────────────",
+    `${box(1)} Delivery`,
+    `${box(2)} Takeaway`,
+    `${box(3)} Dine-in`
   ].join("\n");
 }
+
 function finalSummary(s) {
-  const lines = s.cart.map((c,i)=>`${i+1}) ${c.item} × ${c.qty} = ${AUD(c.price*c.qty)}`).join("\n");
+  const lines = s.cart.map(
+    (c,i)=>`${i+1}) ${c.item} × ${c.qty} = ${AUD(c.price*c.qty)}`
+  ).join("\n");
   const total = AUD(cartTotal(s.cart));
   const extra =
-    s.orderType === "Delivery" ? `\n📍 Address: ${s.address}` :
-    s.orderType === "Takeaway" ? `\n👤 Name: ${s.customerName}` :
-    `\n👥 Guests: ${s.guests}`;
+    s.orderType === "Delivery" ? `📍 Address: ${s.address}` :
+    s.orderType === "Takeaway" ? `👤 Name: ${s.customerName}` :
+    `👥 Guests: ${s.guests}`;
   const restName = MENUS[s.restaurant].name;
   return [
     `✅ ${restName} — Order Summary`,
+    "────────────────────────",
     lines,
-    `\nOrder Type: ${s.orderType}`,
+    `Order Type: ${s.orderType}`,
     extra,
-    `\nGrand Total: ${total}`,
-    "\n💳 Payment: Pay on Counter",
+    `Grand Total: ${total}`,
+    "💳 Payment: Pay on Counter",
+    "🙏 Thank you for your order!"
   ].join("\n");
 }
 
@@ -329,7 +358,10 @@ async function saveToFuadijan({ phone, item, qty, orderType, address, customerNa
 async function saveCart(restKey, phone, s) {
   try {
     const tasks = s.cart.map(c => {
-      const common = { phone, item: c.item, qty: c.qty, orderType: s.orderType, address: s.address, customerName: s.customerName, price: c.price };
+      const common = {
+        phone, item: c.item, qty: c.qty, orderType: s.orderType,
+        address: s.address, customerName: s.customerName, price: c.price
+      };
       return restKey === "MANDI" ? saveToMandi(common) : saveToFuadijan(common);
     });
     await Promise.all(tasks);
@@ -358,19 +390,23 @@ app.post("/webhook", async (req, res) => {
     const change = entry?.changes?.[0];
     const msg = change?.value?.messages?.[0];
     const phone = msg?.from;
-    res.sendStatus(200);
+
+    res.sendStatus(200); // ACK early
 
     if (!phone || !msg?.text?.body) return;
     const textRaw = msg.text.body.trim();
     const text = textRaw.toLowerCase();
 
+    // shortcuts
     if (text === "reset") { reset(phone); await sendText(phone, "Session cleared. Type 'menu' to start again."); return; }
     if (["menu","hi","hello","start"].includes(text)) { reset(phone); const s = S(phone); s.stage="RESTAURANT"; await sendText(phone, welcome()); return; }
 
     const s = S(phone);
 
+    // Welcome → Restaurant
     if (s.stage === "WELCOME") { s.stage="RESTAURANT"; await sendText(phone, welcome()); return; }
 
+    // Restaurant
     if (s.stage === "RESTAURANT") {
       if (text === "1") s.restaurant = "MANDI";
       else if (text === "2") s.restaurant = "FUADIJAN";
@@ -380,6 +416,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // Category
     if (s.stage === "CATEGORY") {
       const n = parseInt(text, 10);
       const cat = MENUS[s.restaurant].categories.find(c => c.code === n);
@@ -390,6 +427,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // Item
     if (s.stage === "ITEM") {
       const idx = parseInt(text, 10);
       const cat = MENUS[s.restaurant].categories.find(c => c.code === s.category);
@@ -403,6 +441,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // Quantity
     if (s.stage === "QTY") {
       const q = parseInt(text, 10);
       if (!Number.isInteger(q) || q <= 0) { await sendText(phone, "Please send a whole number like 1, 2, 3."); return; }
@@ -413,6 +452,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // Add more / Checkout
     if (s.stage === "ADD_OR_CHECKOUT") {
       if (text === "1") { s.stage="CATEGORY"; await sendText(phone, categoriesPrompt(s.restaurant)); }
       else if (text === "2") { s.stage="ORDER_TYPE"; await sendText(phone, orderTypePrompt()); }
@@ -420,14 +460,16 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // Order type
     if (s.stage === "ORDER_TYPE") {
       if (text === "1") { s.orderType="Delivery"; s.stage="ADDRESS"; await sendText(phone, "Please share your delivery address."); return; }
-      if (text === "2") { s.orderType="Takeaway"; s.stage="NAME"; await sendText(phone, "Please share your name for pick-up."); return; }
-      if (text === "3") { s.orderType="Dine-in"; s.stage="GUESTS"; await sendText(phone, "How many guests? Send a number."); return; }
+      if (text === "2") { s.orderType="Takeaway"; s.stage="NAME";    await sendText(phone, "Please share your name for pick-up.");   return; }
+      if (text === "3") { s.orderType="Dine-in";  s.stage="GUESTS";  await sendText(phone, "How many guests? Send a number.");       return; }
       await sendText(phone, "Please choose 1, 2 or 3.\n\n" + orderTypePrompt());
       return;
     }
 
+    // Collect details
     if (s.stage === "ADDRESS") { s.address = textRaw; s.stage="CONFIRM"; }
     if (s.stage === "NAME")    { s.customerName = textRaw; s.stage="CONFIRM"; }
     if (s.stage === "GUESTS")  {
@@ -436,12 +478,13 @@ app.post("/webhook", async (req, res) => {
       s.guests = g; s.stage="CONFIRM";
     }
 
+    // Confirm + Save
     if (s.stage === "CONFIRM") {
       await sendText(phone, finalSummary(s));
       await sendText(phone, "Saving your order…");
       const result = await saveCart(s.restaurant, phone, s);
       if (result.ok) {
-        await sendText(phone, "✅ Saved to Airtable. Thank you!\nType 'menu' to order again, or 'reset' to start fresh.");
+        await sendText(phone, "✅ Saved to Airtable. Thank you!\n\nType 'menu' to order again, or 'reset' to start fresh.");
       } else {
         await sendText(phone, "⚠️ Error saving to Airtable:\n" + result.msg + "\n\nType 'menu' to try again, or 'reset' to start fresh.");
       }
@@ -470,7 +513,6 @@ app.get("/diag/airtable", async (_req, res) => {
       "Quantity": 1, "Address": "Diag Street", "OrderType": "Takeaway", "OrderTime": now
     }}, { headers });
 
-    // clean up
     await axios.delete(`${mUrl}/${m.data.id}`, { headers });
     await axios.delete(`${fUrl}/${f.data.id}`, { headers });
 
