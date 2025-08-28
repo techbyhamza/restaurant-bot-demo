@@ -1,527 +1,601 @@
-// index.js — Restaurant Online Ordering (WhatsApp Cloud API)
-// Node 18+
+// index.js
+// WhatsApp Ordering Bot – Mataam Al Arabi + Fuadjian
+// Paste this whole file and deploy. Make sure env vars are set as described above.
 
 const express = require("express");
 const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-// ------------ ENV ------------
-const {
-  ACCESS_TOKEN,
-  PHONE_NUMBER_ID,
-  VERIFY_TOKEN,
+// ----------------- ENV -----------------
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;              // Meta WhatsApp token
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;        // WhatsApp phone number ID
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "my-secret-123";
 
-  AIRTABLE_API_KEY,
-  AIRTABLE_BASE_ID_MANDI,
-  AIRTABLE_TABLE_ID_MANDI,
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 
-  AIRTABLE_BASE_ID_FUADIJAN,
-  AIRTABLE_TABLE_ID_FUADIJAN,
-} = process.env;
+const AIRTABLE_BASE_ID_MANDI = process.env.AIRTABLE_BASE_ID_MANDI;
+const AIRTABLE_TABLE_ID_MANDI =
+  process.env.AIRTABLE_TABLE_ID_MANDI || "Orders_mandi";
 
-// ------------ HELPERS ------------
-async function sendText(to, body) {
-  const url = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
-  await axios.post(
-    url,
-    { messaging_product: "whatsapp", to, text: { body } },
-    { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+const AIRTABLE_BASE_ID_FUADIJAN =
+  process.env.AIRTABLE_BASE_ID_FUADIJAN || process.env.AIRTABLE_BASE_ID_FUADIJAN;
+const AIRTABLE_TABLE_ID_FUADIJAN =
+  process.env.AIRTABLE_TABLE_ID_FUADIJAN || "Orders_Fuadijan";
+
+const ORDER_TZ = process.env.ORDER_TZ || "Australia/Sydney";
+
+// ----------------- IN-MEMORY SESSIONS -----------------
+const SESS = new Map(); // key: phone, value: { state, restaurant, customerName, cart:[], category, item, qty, orderType, address }
+
+// helpers
+const getSess = (id) => {
+  if (!SESS.has(id)) {
+    SESS.set(id, { state: "WELCOME", cart: [] });
+  }
+  return SESS.get(id);
+};
+const resetSess = (id) => {
+  SESS.set(id, { state: "WELCOME", cart: [] });
+};
+
+// ----------------- MENUS (with prices) -----------------
+/**
+ * Restaurant keys: "mandi" (Mataam Al Arabi), "fuadijan" (Fuadjian)
+ * Structure: { categories: [ { id, name, emoji, items: [ {id,name,price} ] } ] }
+ */
+
+// Mataam Al Arabi (Authentic Mandi & BBQ)
+const MENU_MANDI = {
+  categories: [
+    {
+      id: "mandi",
+      name: "Mandi",
+      emoji: "🍚",
+      items: [
+        { id: "lamb_mandi_single", name: "Lamb Mandi (Single)", price: 22 },
+        { id: "chicken_mandi_single", name: "Chicken Mandi (Single)", price: 20 },
+        { id: "mutton_masala_mandi", name: "Mutton Masala Mandi", price: 20 },
+        { id: "fish_mandi", name: "Fish Mandi", price: 20 },
+        { id: "lamb_ribs_mandi", name: "Lamb Ribs Mandi", price: 30 },
+        { id: "mandi_rice", name: "Mandi Rice", price: 10 },
+      ],
+    },
+    {
+      id: "deals",
+      name: "Mandi Deals",
+      emoji: "🧆",
+      items: [
+        { id: "mix_mandi_deal", name: "Mix Mandi Deal", price: 50 },
+        { id: "family_mandi_large", name: "Family Mandi Meal (Large)", price: 120 },
+        { id: "special_family_mandi", name: "Special Family Mandi Deal", price: 175 },
+      ],
+    },
+    {
+      id: "whole_lamb",
+      name: "Whole Lamb Mandi",
+      emoji: "🍖",
+      items: [
+        { id: "whole_lamb_takeaway", name: "Whole Lamb for 20 (Take-away)", price: 600 },
+        { id: "whole_lamb_dinein", name: "Whole Lamb for 20 (Dine-in)", price: 650 },
+      ],
+    },
+    {
+      id: "curries",
+      name: "Curries",
+      emoji: "🍲",
+      items: [
+        { id: "mughlai_mutton", name: "Mughlai Mutton", price: 20 },
+        { id: "dum_ka_chicken", name: "Dum ka Chicken", price: 20 },
+        { id: "lamb_marag", name: "Lamb Marag Soup", price: 20 },
+        { id: "chicken_kadai", name: "Chicken Kadai", price: 20 },
+        { id: "butter_chicken", name: "Butter Chicken", price: 20 },
+      ],
+    },
+    {
+      id: "breads",
+      name: "Bread (Naan)",
+      emoji: "🥖",
+      items: [
+        { id: "plain_naan", name: "Plain Naan", price: 2.5 },
+        { id: "butter_naan", name: "Butter Naan", price: 3 },
+        { id: "cheese_naan", name: "Cheese Naan", price: 4 },
+        { id: "garlic_naan", name: "Garlic Naan", price: 4 },
+        { id: "cheese_garlic_naan", name: "Cheese Garlic Naan", price: 4.5 },
+      ],
+    },
+    {
+      id: "desserts_drinks",
+      name: "Desserts & Drinks",
+      emoji: "🍮",
+      items: [
+        { id: "fruit_custard", name: "Fruit Custard", price: 8 },
+        { id: "gulab_jamun", name: "Gulab Jamun", price: 8 },
+        { id: "sitafal_cream", name: "Sitafal Cream", price: 8 },
+        { id: "mango_malai", name: "Mango Malai", price: 8 },
+        { id: "soft_drink", name: "Soft Drink (Can)", price: 3 },
+        { id: "mango_lassi", name: "Mango Lassi", price: 7 },
+        { id: "kulfi", name: "Kulfi", price: 6 },
+      ],
+    },
+  ],
+};
+
+// Fuadjian – Best Pakistani Street Food
+const MENU_FUADIJAN = {
+  categories: [
+    {
+      id: "burgers_wraps",
+      name: "Burgers & Wraps",
+      emoji: "🍔",
+      items: [
+        { id: "beef_burger", name: "Beef Burger", price: 14 },
+        { id: "chicken_tikka_burger", name: "Chicken Tikka Burger", price: 13 },
+        { id: "zinger_burger", name: "Zinger Burger", price: 13 },
+        { id: "chicken_shami_burger", name: "Chicken Shami Burger", price: 11 },
+        { id: "veggie_wrap", name: "Veggie Wrap", price: 13 },
+      ],
+    },
+    {
+      id: "karahi_nihari",
+      name: "Karahi & Nihari",
+      emoji: "🍛",
+      items: [
+        { id: "chicken_karahi_half", name: "Chicken Karahi (Half)", price: 24 },
+        { id: "beef_nihari_plate", name: "Beef Nihari Plate", price: 15 },
+      ],
+    },
+    {
+      id: "plates_bbq",
+      name: "BBQ & Plates",
+      emoji: "🍢",
+      items: [
+        { id: "chicken_tikka_plate", name: "Chicken Tikka Plate", price: 18 },
+        { id: "beef_seekh_plate", name: "Beef Seekh Plate", price: 18 },
+        { id: "beef_chapli_plate", name: "Beef Chapli Kebab Plate", price: 18 },
+        { id: "lamb_chops_3", name: "Lamb Chops — 3 pieces", price: 20 },
+      ],
+    },
+    {
+      id: "sweets_drinks",
+      name: "Sweets & Drinks",
+      emoji: "🥤",
+      items: [
+        { id: "gulab_jamun_pc", name: "Gulab Jamun (1 pc)", price: 2 },
+        { id: "kheer_200g", name: "Kheer (200 gms)", price: 6 },
+        { id: "soft_drink_125", name: "1.25L Soft Drink", price: 6 },
+        { id: "milkshake_mango", name: "Mango Milkshake", price: 9 },
+        { id: "juice_bottle", name: "Juice Bottle", price: 5 },
+        { id: "water_bottle", name: "Water Bottle", price: 3 },
+      ],
+    },
+  ],
+};
+
+// quick indexers
+const R_MENUS = {
+  mandi: MENU_MANDI,
+  fuadijan: MENU_FUADIJAN,
+};
+
+// ----------------- TIMEZONE ISO -----------------
+function zonedNowISO(tz = ORDER_TZ) {
+  const now = new Date();
+  const dtf = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(dtf.formatToParts(now).map(p => [p.type, p.value]));
+  const y = Number(parts.year);
+  const m = Number(parts.month);
+  const d = Number(parts.day);
+  const H = Number(parts.hour);
+  const M = Number(parts.minute);
+  const S = Number(parts.second);
+  const utcLike = Date.UTC(y, m - 1, d, H, M, S);
+  const offsetMin = Math.round((utcLike - now.getTime()) / 60000);
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMin);
+  const offHH = String(Math.floor(abs / 60)).padStart(2, "0");
+  const offMM = String(abs % 60).padStart(2, "0");
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${sign}${offHH}:${offMM}`;
+}
+
+// ----------------- WHATSAPP SEND -----------------
+async function send(to, text) {
+  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: text },
+  };
+  await axios.post(url, payload, {
+    headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+  });
+}
+
+// ----------------- UI BUILDERS -----------------
+const NL = "\n";
+const SP = " "; // keep tight spacing
+
+function welcomeMsg() {
+  return (
+    "👋 Welcome to our Online Ordering System!" + NL +
+    NL +
+    "Select your restaurant:" + NL +
+    "1️⃣ Mataam Al Arabi 🍖 — Authentic Mandi & BBQ Restaurant" + NL +
+    NL + // small professional gap
+    "2️⃣ Fuadjian 🌶️ — Best Pakistani Street Food" + NL +
+    NL +
+    "Type the number. Send 'menu' anytime to restart, or 'reset' to clear."
   );
 }
-const BOX = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
-const box = (n) => BOX[n] || `${n}.`;
-const AUD = (n) => `A$${Number(n).toFixed(2)}`;
 
-// ------------ SESSION ------------
-const sessions = new Map();
-function S(phone) {
-  if (!sessions.has(phone)) {
-    sessions.set(phone, {
-      stage: "WELCOME",
-      restaurant: null,
-      category: null,
-      itemPending: null,
-      itemPendingPrice: 0,
-      cart: [], // [{item, price, qty}]
-      orderType: null,
-      address: null,
-      customerName: null,
-      guests: null,
-    });
+function categoriesMsg(restaurantKey) {
+  const restTitle =
+    restaurantKey === "mandi"
+      ? "Mataam Al Arabi"
+      : "Fuadjian";
+  const cats = R_MENUS[restaurantKey].categories;
+
+  let lines = [];
+  lines.push(`📋 ${restTitle} — Categories`);
+  lines.push(""); // one small gap
+
+  cats.forEach((c, i) => {
+    lines.push(`${boxNum(i + 1)} ${c.emoji} ${c.name}`);
+  });
+
+  lines.push("");
+  lines.push("Type the number to choose a category.");
+  return lines.join(NL);
+}
+
+function itemsMsg(restaurantKey, categoryIndex) {
+  const cat = R_MENUS[restaurantKey].categories[categoryIndex];
+  let lines = [];
+  lines.push(`${cat.emoji} ${cat.name}`);
+  lines.push("");
+  cat.items.forEach((it, i) => {
+    lines.push(`${boxNum(i + 1)} ${it.name} (A$${it.price})`);
+  });
+  lines.push("");
+  lines.push("Type the number to choose an item.");
+  return lines.join(NL);
+}
+
+function askQtyMsg(itemName, price) {
+  return (
+    `How many for “${itemName}” (A$${price})?` + NL +
+    "Reply with a number, e.g. 1 or 2."
+  );
+}
+
+function addMoreMsg() {
+  return (
+    "Would you like to add another item?" + NL +
+    `${boxNum(1)} Yes   ${boxNum(2)} No`
+  );
+}
+
+function orderTypeMsg() {
+  return (
+    "Choose order type:" + NL +
+    `${boxNum(1)} Delivery 🚚` + NL +
+    `${boxNum(2)} Takeaway 🛍️` + NL +
+    `${boxNum(3)} Dine-in 🍽️`
+  );
+}
+
+function confirmationMsg(sess) {
+  const lines = [];
+  const prettyItems = sess.cart
+    .map(it => `${it.emoji} ${it.name} × ${it.qty}`)
+    .join(NL);
+
+  const total = sess.cart.reduce((sum, i) => sum + i.qty * i.price, 0);
+
+  lines.push(`Restaurant: ${sess.restaurant === "mandi" ? "Mataam Al Arabi" : "Fuadjian — Pakistani Street Food"}`);
+  lines.push(`Name: ${sess.customerName}`);
+  lines.push(`Order Type: ${sess.orderType}`);
+  if (sess.orderType === "Delivery") lines.push(`Address: ${sess.address}`);
+  lines.push("");
+  lines.push(prettyItems);
+  lines.push(``);
+  lines.push(`Qty: ${sess.cart.reduce((n, i) => n + i.qty, 0)}`);
+  lines.push(`Total: A$${total.toFixed(2)}`);
+  lines.push("");
+  lines.push("✅ Confirm → type *yes*");
+  lines.push("❌ Cancel → type *no*");
+  return lines.join(NL);
+}
+
+function orderConfirmedMsg(sess) {
+  const total = sess.cart.reduce((sum, i) => sum + i.qty * i.price, 0);
+  const firstLine =
+    sess.cart.length === 1
+      ? `${sess.cart[0].emoji} ${sess.cart[0].name} × ${sess.cart[0].qty}`
+      : sess.cart.map(i => `${i.emoji} ${i.name} × ${i.qty}`).join(NL);
+
+  return (
+    "🎉 Order confirmed!" + NL +
+    firstLine + NL +
+    `Total: A$${total.toFixed(2)}` + NL +
+    NL +
+    "Type *menu* to order again or *restart* to switch restaurant."
+  );
+}
+
+function boxNum(n) {
+  const map = { 1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣" };
+  return map[n] || `${n}️⃣`;
+}
+
+// ----------------- CART / AIRTABLE HELPERS -----------------
+function addItemToCart(sess, restaurantKey, categoryIndex, itemIndex, qty) {
+  const cat = R_MENUS[restaurantKey].categories[categoryIndex];
+  const it = cat.items[itemIndex];
+  sess.cart.push({
+    id: it.id,
+    name: it.name,
+    price: it.price,
+    qty,
+    emoji: R_MENUS[restaurantKey].categories[categoryIndex].emoji,
+  });
+}
+
+function buildOrderItemsText(cart) {
+  return cart.map(i => `${i.name} (A$${i.price}) × ${i.qty}`).join(" • ");
+}
+function sumQuantity(cart) {
+  return cart.reduce((n, i) => n + Number(i.qty || 0), 0);
+}
+
+async function saveToAirtable(sess, from) {
+  const restaurantKey = sess.restaurant; // "mandi" | "fuadijan"
+  const baseId =
+    restaurantKey === "mandi" ? AIRTABLE_BASE_ID_MANDI : AIRTABLE_BASE_ID_FUADIJAN;
+  const tableIdOrName =
+    restaurantKey === "mandi" ? AIRTABLE_TABLE_ID_MANDI : AIRTABLE_TABLE_ID_FUADIJAN;
+
+  const orderItemsText = buildOrderItemsText(sess.cart);
+  const totalQty = sumQuantity(sess.cart);
+  const orderTimeISO = zonedNowISO();
+
+  let fields;
+  if (restaurantKey === "mandi") {
+    fields = {
+      "Phone Number": from,
+      "Customer Name": sess.customerName,
+      "Order Item": orderItemsText,
+      "Quantity": totalQty,
+      "Address": sess.orderType === "Delivery" ? (sess.address || "") : (sess.orderType || ""),
+      "Status": "Pending",
+      "Order Type": sess.orderType,
+      "Order Time": orderTimeISO,
+    };
+  } else {
+    fields = {
+      "PhoneNumber": from,
+      "CustomerName": sess.customerName,
+      "MenuItem": orderItemsText,
+      "Quantity": totalQty,
+      "Address": sess.orderType === "Delivery" ? (sess.address || "") : (sess.orderType || ""),
+      "OrderType": sess.orderType,
+      "OrderTime": orderTimeISO,
+    };
   }
-  return sessions.get(phone);
-}
-function reset(p){ sessions.delete(p); }
-const cartTotal = (cart)=>cart.reduce((s,c)=>s + c.price * c.qty, 0);
 
-// ------------ MENUS + PRICES -------------
-const MENUS = {
-  MANDI: {
-    name: "Mataam Al Arabi",
-    tagline: "Authentic Mandi & BBQ Restaurant",
-    categories: [
-      { code: 1, key: "mandi_single",  title: "Mandi — Single 🍛" },
-      { code: 2, key: "mandi_deals",   title: "Mandi Deals 👨‍👩‍👧‍👦" },
-      { code: 3, key: "curries",       title: "Curries 🥘" },
-      { code: 4, key: "breads",        title: "Bread (Naan) 🍞" },
-      { code: 5, key: "desserts",      title: "Desserts 🍨" },
-      { code: 6, key: "drinks",        title: "Drinks & Ice Creams 🥤" },
-      { code: 7, key: "entree",        title: "Starters / Entree 🍢" },
-      { code: 8, key: "lamb_biryani",  title: "Lamb Biryani 🍖" },
-      { code: 9, key: "paan",          title: "Paan Corner 🍃" },
-    ],
-  },
+  const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableIdOrName)}`;
+  const payload = { records: [{ fields }] };
 
-  FUADIJAN: {
-    name: "Fuadijan",
-    tagline: "Best Pakistani Street Food",
-    categories: [
-      { code: 1, key: "breakfast", title: "Breakfast 🍳 (till 2PM)" },
-      { code: 2, key: "karahi",    title: "Karahi & Nihari 🍲" },
-      { code: 3, key: "burgers",   title: "Burgers 🍔" },
-      { code: 4, key: "wraps",     title: "Wraps 🌯" },
-      { code: 5, key: "snacks",    title: "Snacks & Sides 🍟" },
-      { code: 6, key: "plates",    title: "BBQ Plates 🍖 (incl. naan or rice)" },
-      { code: 7, key: "addons",    title: "Add-ons 🧂" },
-      { code: 8, key: "desserts",  title: "Desserts 🍰" },
-      { code: 9, key: "drinks",    title: "Drinks & Juices 🥤" },
-    ],
-  },
-};
-
-// PRICES
-const PRICES = {
-  // ----- Mataam Al Arabi -----
-  mandi_single: [
-    { label: "Lamb Mandi", price: 22 },
-    { label: "Chicken Mandi", price: 22 },
-    { label: "Chicken Tikka Mandi", price: 22 },
-    { label: "Fish Mandi", price: 22 },
-    { label: "Mutton Masala Mandi", price: 30 },
-    { label: "Lamb Ribs Mandi", price: 30 },
-    { label: "Mandi Rice", price: 10 },
-  ],
-  mandi_deals: [
-    { label: "Mix Mandi Deal", price: 50 },
-    { label: "Mix Mandi Deal with Fish", price: 58 },
-    { label: "Family Mandi Meal (Medium)", price: 90 },
-    { label: "Family Mandi Meal (Large)", price: 120 },
-    { label: "Special Family Mandi", price: 125 },
-    { label: "Whole Lamb Mandi (pre-order)", price: 600 },
-  ],
-  curries: [
-    { label: "Muglai Mutton", price: 20 },
-    { label: "Dum ka Chicken", price: 20 },
-    { label: "Lamb Marag Soup", price: 20 },
-    { label: "Chicken Kadai", price: 20 },
-    { label: "Mutton Masala", price: 20 },
-    { label: "Butter Chicken", price: 20 },
-  ],
-  breads: [
-    { label: "Plain Naan", price: 2.5 },
-    { label: "Butter Naan", price: 3 },
-    { label: "Cheese Naan", price: 4 },
-    { label: "Garlic Naan", price: 4 },
-    { label: "Cheese Garlic Naan", price: 4.5 },
-  ],
-  desserts: [
-    { label: "Fruit Custard", price: 8 },
-    { label: "Gulab Jamun", price: 8 },
-    { label: "Sitafal Cream", price: 8 },
-    { label: "Mango Malai", price: 8 },
-    { label: "Double ka Meetha", price: 8 },
-  ],
-  drinks: [
-    { label: "Coke / Fanta / Sprite (can)", price: 3 },
-    { label: "Water", price: 3 },
-    { label: "Mango Lassi", price: 7 },
-    { label: "Kulfi", price: 5 },
-    { label: "Mix Ice Cream (cup)", price: 5 },
-  ],
-  entree: [
-    { label: "Chicken 65", price: 20 },
-    { label: "Seekh Kebab", price: 20 },
-    { label: "Malai Tikka", price: 20 },
-    { label: "Fish Fry", price: 20 },
-    { label: "Chicken Tikka", price: 20 },
-    { label: "Chicken Tandoori", price: 20 },
-    { label: "Chips & Nuggets", price: 12 },
-  ],
-  lamb_biryani: [
-    { label: "Sufiyani Biryani", price: 20 },
-    { label: "Mughal Biryani", price: 20 },
-    { label: "Special Family Biryani", price: 45 },
-  ],
-  paan: [
-    { label: "Sweet Paan", price: 5 },
-    { label: "Meenakshi Paan", price: 6 },
-    { label: "Saada Paan", price: 5 },
-  ],
-
-  // ----- Fuadijan -----
-  breakfast: [
-    { label: "Anda Bun", price: 8.99 },
-    { label: "Anda Paratha", price: 11.99 },
-    { label: "Halwa Poori", price: 14.99 },
-    { label: "Doodh Patti Chai", price: 2.5 },
-    { label: "Beef Nihari", price: 14.99 },
-  ],
-  karahi: [
-    { label: "Chicken Karahi (Half)", price: 24 },
-    { label: "Beef Nihari Plate", price: 15 },
-  ],
-  burgers: [
-    { label: "Beef Burger", price: 14 },
-    { label: "Chicken Shami Burger", price: 11 },
-    { label: "Chicken Tikka Burger", price: 13 },
-  ],
-  wraps: [
-    { label: "Wrap (Chicken Tikka or Beef Seekh)", price: 13 },
-    { label: "Veggie Wrap", price: 13 },
-  ],
-  snacks: [
-    { label: "Crispy Hot Chips (Small)", price: 5 },
-    { label: "Crispy Hot Chips (Large)", price: 10 },
-    { label: "Chicken Tikka Snack Pack (Small)", price: 10 },
-    { label: "Chicken Tikka Snack Pack (Large)", price: 20 },
-  ],
-  plates: [
-    { label: "Chicken Tikka — 2 Skewers", price: 18 },
-    { label: "Chicken Tikka — 3 Skewers", price: 25 },
-    { label: "Chicken Seekh — 2 Skewers", price: 18 },
-    { label: "Chicken Seekh — 3 Skewers", price: 25 },
-    { label: "Beef Seekh — 2 Skewers", price: 18 },
-    { label: "Beef Seekh — 3 Skewers", price: 25 },
-    { label: "Beef Chapli Kebab — 1", price: 10 },
-    { label: "Lamb Chops — 3 pieces", price: 20 },
-  ],
-  addons: [
-    { label: "Garden Salad", price: 2 },
-    { label: "Yogurt Sauce", price: 2 },
-    { label: "Tandoori Roti", price: 3 },
-    { label: "Naan", price: 3 },
-    { label: "Rice", price: 3.5 },
-  ],
-  desserts_fuadijan: [
-    { label: "Gulab Jamun (1 pc)", price: 2 },
-    { label: "Kheer (200 gms)", price: 6 },
-  ],
-  drinks_fuadijan: [
-    { label: "Milk Shake", price: 9 },
-    { label: "Juices", price: 5 },
-    { label: "Pakola", price: 3 },
-    { label: "1.25L Soft Drink", price: 6 },
-    { label: "Water", price: 3 },
-  ],
-};
-
-// Map for Fuadijan special keys
-const KEY_MAP = {
-  MANDI: {},
-  FUADIJAN: {
-    desserts: "desserts_fuadijan",
-    drinks: "drinks_fuadijan",
-  },
-};
-
-function itemsFor(restKey, menuKey) {
-  const effectiveKey = restKey === "FUADIJAN" && KEY_MAP.FUADIJAN[menuKey]
-    ? KEY_MAP.FUADIJAN[menuKey]
-    : menuKey;
-  return PRICES[effectiveKey] || [];
+  const res = await axios.post(url, payload, {
+    headers: {
+      Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+  });
+  return res.data;
 }
 
-// ------------ TEMPLATES (Welcome spaced, others compact) ------------
-function welcome() {
-  return [
-    "👋 Welcome to the Online Ordering System!",
-    "",
-    "✨ Please choose a restaurant:",
-    "",
-    `${box(1)} ${MENUS.MANDI.name} 🍖`,
-    `   ${MENUS.MANDI.tagline}`,
-    "",
-    `${box(2)} ${MENUS.FUADIJAN.name} 🌶️`,
-    `   ${MENUS.FUADIJAN.tagline}`,
-    "",
-    "────────────────────────",
-    "",
-    "💡 Type the number to continue.",
-    "🔄 Send 'menu' anytime to restart, or 'reset' to clear."
-  ].join("\n");
-}
-
-function categoriesPrompt(restKey) {
-  const { name, categories } = MENUS[restKey];
-  const rows = categories.map(c => `${box(c.code)} ${c.title}`).join("\n");
-  return [
-    `📋 ${name}`,
-    "────────────────────────",
-    "Please choose a category:",
-    rows
-  ].join("\n");
-}
-
-function itemsPrompt(restKey, catCode) {
-  const cat = MENUS[restKey].categories.find(c => c.code === catCode);
-  const items = itemsFor(restKey, cat.key);
-  const rows = items.map((it, idx) => `${box(idx+1)} ${it.label} — ${AUD(it.price)}`).join("\n");
-  return [
-    `🔎 ${cat.title}`,
-    "────────────────────────",
-    "Please choose an item:",
-    rows
-  ].join("\n");
-}
-
-function qtyPrompt(item, price) {
-  return `How many for “${item}” (${AUD(price)})? Reply with a number (e.g., 1, 2, 3).`;
-}
-
-function addOrCheckoutPrompt(cart) {
-  const lines = cart.map(
-    (c,i)=>`${i+1}) ${c.item} × ${c.qty} = ${AUD(c.price*c.qty)}`
-  ).join("\n");
-  return [
-    "✅ Item added to cart",
-    "🛒 Your Cart",
-    "────────────────────────",
-    lines || "(empty)",
-    `Subtotal: ${AUD(cartTotal(cart))}`,
-    `${box(1)} Add more items`,
-    `${box(2)} Proceed to Checkout`
-  ].join("\n");
-}
-
-function orderTypePrompt() {
-  return [
-    "🚚 Choose order type",
-    "────────────────────────",
-    `${box(1)} Delivery`,
-    `${box(2)} Takeaway`,
-    `${box(3)} Dine-in`
-  ].join("\n");
-}
-
-function finalSummary(s) {
-  const lines = s.cart.map(
-    (c,i)=>`${i+1}) ${c.item} × ${c.qty} = ${AUD(c.price*c.qty)}`
-  ).join("\n");
-  const total = AUD(cartTotal(s.cart));
-  const extra =
-    s.orderType === "Delivery" ? `📍 Address: ${s.address}` :
-    s.orderType === "Takeaway" ? `👤 Name: ${s.customerName}` :
-    `👥 Guests: ${s.guests}`;
-  const restName = MENUS[s.restaurant].name;
-  return [
-    `✅ ${restName} — Order Summary`,
-    "────────────────────────",
-    lines,
-    `Order Type: ${s.orderType}`,
-    extra,
-    `Grand Total: ${total}`,
-    "💳 Payment: Pay on Counter",
-    "🙏 Thank you for your order!"
-  ].join("\n");
-}
-
-// ------------ AIRTABLE ------------
-async function saveToMandi({ phone, item, qty, orderType, address, price }) {
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID_MANDI}/${AIRTABLE_TABLE_ID_MANDI}`;
-  const headers = { Authorization: `Bearer ${AIRTABLE_API_KEY}`, "Content-Type": "application/json" };
-  const fields = {
-    "Phone Number": phone,
-    "Order Item": `${item} (${AUD(price)})`,
-    "Quantity": qty,
-    "Address": address || "",
-    "Status": "Pending",
-    "Order Type": orderType || "",
-    "Order Time": new Date().toISOString(),
-  };
-  return axios.post(url, { fields }, { headers });
-}
-async function saveToFuadijan({ phone, item, qty, orderType, address, customerName, price }) {
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID_FUADIJAN}/${AIRTABLE_TABLE_ID_FUADIJAN}`;
-  const headers = { Authorization: `Bearer ${AIRTABLE_API_KEY}`, "Content-Type": "application/json" };
-  const fields = {
-    "CustomerName": customerName || "",
-    "PhoneNumber": phone,
-    "MenuItem": `${item} (${AUD(price)})`,
-    "Quantity": qty,
-    "Address": address || "",
-    "OrderType": orderType || "",
-    "OrderTime": new Date().toISOString(),
-  };
-  return axios.post(url, { fields }, { headers });
-}
-async function saveCart(restKey, phone, s) {
-  try {
-    const tasks = s.cart.map(c => {
-      const common = {
-        phone, item: c.item, qty: c.qty, orderType: s.orderType,
-        address: s.address, customerName: s.customerName, price: c.price
-      };
-      return restKey === "MANDI" ? saveToMandi(common) : saveToFuadijan(common);
-    });
-    await Promise.all(tasks);
-    return { ok: true };
-  } catch (e) {
-    const data = e?.response?.data || e.message || "Unknown error";
-    console.error("Airtable error:", data);
-    const msg = typeof data === "string" ? data : (data?.error?.message || JSON.stringify(data).slice(0, 400));
-    return { ok: false, msg };
-  }
-}
-
-// ------------ WEBHOOK VERIFY ------------
+// ----------------- WEBHOOK (VERIFY) -----------------
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
   return res.sendStatus(403);
 });
 
-// ------------ WEBHOOK RECEIVE ------------
+// ----------------- WEBHOOK (MESSAGES) -----------------
 app.post("/webhook", async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
     const change = entry?.changes?.[0];
-    const msg = change?.value?.messages?.[0];
-    const phone = msg?.from;
+    const message = change?.value?.messages?.[0];
+    if (!message) return res.sendStatus(200);
 
-    res.sendStatus(200); // ACK early
+    const from = message.from; // phone number (string)
+    const text = (message.text?.body || "").trim();
+    const sess = getSess(from);
 
-    if (!phone || !msg?.text?.body) return;
-    const textRaw = msg.text.body.trim();
-    const text = textRaw.toLowerCase();
-
-    // shortcuts
-    if (text === "reset") { reset(phone); await sendText(phone, "Session cleared. Type 'menu' to start again."); return; }
-    if (["menu","hi","hello","start"].includes(text)) { reset(phone); const s = S(phone); s.stage="RESTAURANT"; await sendText(phone, welcome()); return; }
-
-    const s = S(phone);
-
-    // Welcome → Restaurant
-    if (s.stage === "WELCOME") { s.stage="RESTAURANT"; await sendText(phone, welcome()); return; }
-
-    // Restaurant
-    if (s.stage === "RESTAURANT") {
-      if (text === "1") s.restaurant = "MANDI";
-      else if (text === "2") s.restaurant = "FUADIJAN";
-      else { await sendText(phone, "Please pick 1 or 2.\n\n" + welcome()); return; }
-      s.stage = "CATEGORY";
-      await sendText(phone, categoriesPrompt(s.restaurant));
-      return;
+    // global commands
+    if (/^(menu|restart)$/i.test(text)) {
+      resetSess(from);
+      await send(from, welcomeMsg());
+      return res.sendStatus(200);
+    }
+    if (/^reset$/i.test(text)) {
+      resetSess(from);
+      await send(from, "Session cleared. " + NL + NL + welcomeMsg());
+      return res.sendStatus(200);
+    }
+    if (/^(hi|hello|hey)$/i.test(text) && sess.state === "WELCOME") {
+      await send(from, welcomeMsg());
+      sess.state = "CHOOSE_RESTAURANT";
+      return res.sendStatus(200);
     }
 
-    // Category
-    if (s.stage === "CATEGORY") {
-      const n = parseInt(text, 10);
-      const cat = MENUS[s.restaurant].categories.find(c => c.code === n);
-      if (!cat) { await sendText(phone, "Please pick a valid category number.\n\n" + categoriesPrompt(s.restaurant)); return; }
-      s.category = cat.code;
-      s.stage = "ITEM";
-      await sendText(phone, itemsPrompt(s.restaurant, s.category));
-      return;
-    }
-
-    // Item
-    if (s.stage === "ITEM") {
-      const idx = parseInt(text, 10);
-      const cat = MENUS[s.restaurant].categories.find(c => c.code === s.category);
-      const items = itemsFor(s.restaurant, cat.key);
-      const picked = items[idx - 1];
-      if (!picked) { await sendText(phone, "Please pick a valid item number.\n\n" + itemsPrompt(s.restaurant, s.category)); return; }
-      s.itemPending = picked.label;
-      s.itemPendingPrice = picked.price;
-      s.stage = "QTY";
-      await sendText(phone, qtyPrompt(picked.label, picked.price));
-      return;
-    }
-
-    // Quantity
-    if (s.stage === "QTY") {
-      const q = parseInt(text, 10);
-      if (!Number.isInteger(q) || q <= 0) { await sendText(phone, "Please send a whole number like 1, 2, 3."); return; }
-      s.cart.push({ item: s.itemPending, price: s.itemPendingPrice, qty: q });
-      s.itemPending = null; s.itemPendingPrice = 0;
-      s.stage = "ADD_OR_CHECKOUT";
-      await sendText(phone, addOrCheckoutPrompt(s.cart));
-      return;
-    }
-
-    // Add more / Checkout
-    if (s.stage === "ADD_OR_CHECKOUT") {
-      if (text === "1") { s.stage="CATEGORY"; await sendText(phone, categoriesPrompt(s.restaurant)); }
-      else if (text === "2") { s.stage="ORDER_TYPE"; await sendText(phone, orderTypePrompt()); }
-      else { await sendText(phone, "Please send 1 (Add more) or 2 (Checkout)."); }
-      return;
-    }
-
-    // Order type
-    if (s.stage === "ORDER_TYPE") {
-      if (text === "1") { s.orderType="Delivery"; s.stage="ADDRESS"; await sendText(phone, "Please share your delivery address."); return; }
-      if (text === "2") { s.orderType="Takeaway"; s.stage="NAME";    await sendText(phone, "Please share your name for pick-up.");   return; }
-      if (text === "3") { s.orderType="Dine-in";  s.stage="GUESTS";  await sendText(phone, "How many guests? Send a number.");       return; }
-      await sendText(phone, "Please choose 1, 2 or 3.\n\n" + orderTypePrompt());
-      return;
-    }
-
-    // Collect details
-    if (s.stage === "ADDRESS") { s.address = textRaw; s.stage="CONFIRM"; }
-    if (s.stage === "NAME")    { s.customerName = textRaw; s.stage="CONFIRM"; }
-    if (s.stage === "GUESTS")  {
-      const g = parseInt(text, 10);
-      if (!Number.isInteger(g) || g <= 0) { await sendText(phone, "Please send a valid number of guests."); return; }
-      s.guests = g; s.stage="CONFIRM";
-    }
-
-    // Confirm + Save
-    if (s.stage === "CONFIRM") {
-      await sendText(phone, finalSummary(s));
-      await sendText(phone, "Saving your order…");
-      const result = await saveCart(s.restaurant, phone, s);
-      if (result.ok) {
-        await sendText(phone, "✅ Saved to Airtable. Thank you!\n\nType 'menu' to order again, or 'reset' to start fresh.");
-      } else {
-        await sendText(phone, "⚠️ Error saving to Airtable:\n" + result.msg + "\n\nType 'menu' to try again, or 'reset' to start fresh.");
+    // state machine
+    switch (sess.state) {
+      case "WELCOME": {
+        await send(from, welcomeMsg());
+        sess.state = "CHOOSE_RESTAURANT";
+        break;
       }
-      reset(phone);
-      return;
+
+      case "CHOOSE_RESTAURANT": {
+        if (text === "1" || /arabi/i.test(text)) {
+          sess.restaurant = "mandi";
+        } else if (text === "2" || /fuad/i.test(text)) {
+          sess.restaurant = "fuadijan";
+        } else {
+          await send(from, "Please type 1 or 2 to select a restaurant." + NL + NL + welcomeMsg());
+          break;
+        }
+        sess.state = "ASK_NAME";
+        await send(from, "Please share your name:");
+        break;
+      }
+
+      case "ASK_NAME": {
+        if (!text) {
+          await send(from, "Please type your name:");
+          break;
+        }
+        sess.customerName = text;
+        sess.state = "CHOOSE_CATEGORY";
+        await send(from, categoriesMsg(sess.restaurant));
+        break;
+      }
+
+      case "CHOOSE_CATEGORY": {
+        const cats = R_MENUS[sess.restaurant].categories;
+        const idx = parseInt(text, 10) - 1;
+        if (isNaN(idx) || idx < 0 || idx >= cats.length) {
+          await send(from, "Please type a valid category number." + NL + NL + categoriesMsg(sess.restaurant));
+          break;
+        }
+        sess.categoryIndex = idx;
+        sess.state = "CHOOSE_ITEM";
+        await send(from, itemsMsg(sess.restaurant, idx));
+        break;
+      }
+
+      case "CHOOSE_ITEM": {
+        const items = R_MENUS[sess.restaurant].categories[sess.categoryIndex].items;
+        const idx = parseInt(text, 10) - 1;
+        if (isNaN(idx) || idx < 0 || idx >= items.length) {
+          await send(from, "Please type a valid item number." + NL + NL + itemsMsg(sess.restaurant, sess.categoryIndex));
+          break;
+        }
+        sess.itemIndex = idx;
+        const it = items[idx];
+        sess.state = "ASK_QTY";
+        await send(from, askQtyMsg(it.name, it.price));
+        break;
+      }
+
+      case "ASK_QTY": {
+        const qty = parseInt(text, 10);
+        if (isNaN(qty) || qty <= 0) {
+          await send(from, "Please reply with a valid quantity, e.g. 1 or 2.");
+          break;
+        }
+        addItemToCart(sess, sess.restaurant, sess.categoryIndex, sess.itemIndex, qty);
+        sess.state = "ADD_MORE";
+        await send(from, addMoreMsg());
+        break;
+      }
+
+      case "ADD_MORE": {
+        if (text === "1" || /^y(es)?$/i.test(text)) {
+          sess.state = "CHOOSE_CATEGORY";
+          await send(from, categoriesMsg(sess.restaurant));
+        } else if (text === "2" || /^no?$/i.test(text)) {
+          sess.state = "CHOOSE_ORDER_TYPE";
+          await send(from, orderTypeMsg());
+        } else {
+          await send(from, "Please choose an option." + NL + addMoreMsg());
+        }
+        break;
+      }
+
+      case "CHOOSE_ORDER_TYPE": {
+        if (text === "1" || /^del/i.test(text)) {
+          sess.orderType = "Delivery";
+          sess.state = "ASK_ADDRESS";
+          await send(from, "Please enter your delivery address:");
+        } else if (text === "2" || /^take/i.test(text)) {
+          sess.orderType = "Takeaway";
+          sess.address = ""; // not required
+          sess.state = "CONFIRM";
+          await send(from, confirmationMsg(sess));
+        } else if (text === "3" || /^dine/i.test(text)) {
+          sess.orderType = "Dine-in";
+          sess.address = ""; // optional
+          sess.state = "CONFIRM";
+          await send(from, confirmationMsg(sess));
+        } else {
+          await send(from, "Please type 1, 2 or 3." + NL + NL + orderTypeMsg());
+        }
+        break;
+      }
+
+      case "ASK_ADDRESS": {
+        if (!text) {
+          await send(from, "Please type a valid address:");
+          break;
+        }
+        sess.address = text;
+        sess.state = "CONFIRM";
+        await send(from, confirmationMsg(sess));
+        break;
+      }
+
+      case "CONFIRM": {
+        if (/^yes$/i.test(text)) {
+          // Save one row per order
+          try {
+            await saveToAirtable(sess, from);
+            await send(from, orderConfirmedMsg(sess));
+          } catch (e) {
+            console.error("Airtable save error:", e?.response?.data || e.message);
+            await send(from, "⚠️ Error saving to Airtable. Please try again later.");
+          }
+          resetSess(from);
+        } else if (/^no?$/i.test(text)) {
+          await send(from, "Order cancelled. Type *menu* to start again.");
+          resetSess(from);
+        } else {
+          await send(from, "Please type *yes* to confirm or *no* to cancel." + NL + NL + confirmationMsg(sess));
+        }
+        break;
+      }
+
+      default: {
+        resetSess(from);
+        await send(from, welcomeMsg());
+      }
     }
-  } catch (e) {
-    console.error("Webhook error:", e?.response?.data || e.message);
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Webhook error:", err.message, err?.response?.data);
+    res.sendStatus(200);
   }
 });
 
-// ------------ OPTIONAL DIAG ------------
-app.get("/diag/airtable", async (_req, res) => {
-  try {
-    const headers = { Authorization: `Bearer ${AIRTABLE_API_KEY}`, "Content-Type": "application/json" };
-    const now = new Date().toISOString();
-    const mUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID_MANDI}/${AIRTABLE_TABLE_ID_MANDI}`;
-    const fUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID_FUADIJAN}/${AIRTABLE_TABLE_ID_FUADIJAN}`;
-
-    const m = await axios.post(mUrl, { fields: {
-      "Phone Number": "+61400000000", "Order Item": "DIAG — Chicken Mandi (A$22.00)",
-      "Quantity": 1, "Address": "Diag Street", "Status": "Pending", "Order Type": "Delivery", "Order Time": now
-    }}, { headers });
-    const f = await axios.post(fUrl, { fields: {
-      "CustomerName": "Diag User", "PhoneNumber": "+61400000000", "MenuItem": "DIAG — Beef Burger (A$14.00)",
-      "Quantity": 1, "Address": "Diag Street", "OrderType": "Takeaway", "OrderTime": now
-    }}, { headers });
-
-    await axios.delete(`${mUrl}/${m.data.id}`, { headers });
-    await axios.delete(`${fUrl}/${f.data.id}`, { headers });
-
-    res.json({ ok:true });
-  } catch (e) {
-    res.status(500).json({ ok:false, error: e?.response?.data || e.message });
-  }
-});
-
+// Health
 app.get("/", (_req, res) => res.send("OK"));
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
